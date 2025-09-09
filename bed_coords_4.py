@@ -21,6 +21,7 @@ BASE_COORDS = {
     "sRR":   ( 318, 508,  52, 32),
     "TV":    ( 397, 506,  50, 33),
     "Ti":    ( 630, 506,  61, 32),
+    "VentMode": (109, 35, 143, 27),
 }
 
 BED_WIDTH = 1920
@@ -55,6 +56,7 @@ def _build_bed(dx, dy):
             "RRact": b["sRR"],
             "VTset": b["TV"],
             "Ti": b["Ti"],
+            "VentMode": b["VentMode"],
         },
     }
 
