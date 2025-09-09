@@ -1,0 +1,8 @@
+{
+  "VITALS_PATH": "/absolute/path/to/vitals_history.csv",
+  "BEDS_DIR": "/absolute/path/to/beds_directory",
+  "CVP_MODEL_PATH": "/absolute/path/to/cvp_model.keras",
+  "SERVICE_ACCOUNT_FILE": "/absolute/path/to/service_account.json",
+  "IMAGE_FOLDER": "/absolute/path/to/images"
+}
+

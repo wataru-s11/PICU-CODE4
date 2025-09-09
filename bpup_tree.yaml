@@ -1,0 +1,134 @@
+rules:
+- id: BPUP_A
+  when: 'True'
+  message: |
+    ピトレシン・ノルアドレナリンの減量またはハンプ・コントミンの増量を行う。アルゴリズムは
+    ①ノルアドレナリンが0より大きいときはまずノルアドレナリンの減量
+    ②ピトレシンが0.03以上の時はピトレシンの減量
+    ③ピトレシン0-0.02の時、ハンプが0-0.19の時はハンプ増量、ハンプが0.2-0.3の時はコントミンの量をチェック
+    ④コントミンが0の時はコントミンを0.1で開始、0.11-0.3の時は昇圧と降圧薬調整での降圧は難しい可能性を通達
+  severity: info
+  tags:
+  - a
+  - COMAND
+  actions:
+  - POSE_60min
+  - NEXT:すぐにCONT_UP/HANP_UP/VASO_UP指示を呼び出し
+- id: CONT_0_UP
+  when: value == 0
+  message: なし
+  severity: info
+  tags:
+  - r
+  - CONT
+  actions:
+  - NEXT:なし
+- id: CONT_OTHER_UP
+  when: value == 0.05,0.1,0.15,0.2
+  message: コントミンをOFFしてください
+  severity: info
+  tags:
+  - r
+  - CONT
+  actions:
+  - NEXT:なし
+- id: HANP_LOW_UP
+  when: value == 0,0.02.0.05
+  message: なし
+  severity: info
+  tags:
+  - r
+  - HANP
+  actions:
+  - NEXT:なし
+- id: HANP_HIGH_UP
+  when: value == 0.1,0.15,0.2,0.25,0.3
+  message: ハンプを0.05μg/kg/minにしてください
+  severity: info
+  tags:
+  - r
+  - HANP
+  actions:
+  - NEXT:なし
+- id: VASO_HIGH_UP_CVP_UPPER
+  when: value == 0.2-0.1
+  message: 上級医コール，ノルアドレナリン0.05-0.03μg/kg/min開始検討
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_HIGH_UP_CVP_LOWER
+  when: value == 0.2-0.1
+  message: 上級医コール，出血確認プロセス，輸血増量プロセス
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_UP
+  when: value == 0-0.09
+  message: ピトレシンの量を0.03-0.05U/kg/h上げてください
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_LOW
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.05,0.02
+  message: hANPを0.1に増量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_MID
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.1
+  message: hANPを0.2に増量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_HIGH_CONT_LOW
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.2 and vitals["CONT"] == 0,0.05
+  message: コントミンを0.1mg/kg/hへ増量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_HIGH_CONT_MID
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.2 and vitals["CONT"] == 0.10,0.15
+  message: コントミンを0.2mg/kg/hへ増量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_HIGH_CONT_HIGH
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.2 and vitals["CONT"] == 0.2
+  message: 通常の方法で降圧することは不能です。上級医コールまたは基準値の変更を考慮してください。
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_HIGH
+  when: value == 0.03-0.2
+  message: Vasoを0.01または0.02U/kg/h減量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+

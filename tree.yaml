@@ -1,0 +1,595 @@
+rules:
+- id: SPO2_CHECK
+  when: vitals.get("SpO2") > {{SpO2_u}} or vitals.get("SpO2") < {{SpO2_l}}
+  message: SpO2の値が正しいかチェックしてください
+  severity: info
+  tags:
+  - a
+  - SpO2
+  actions:
+  - POSE_60min
+- id: SPO2_UPPER_FIO2_upper
+  when: vitals.get("SpO2") > {{SpO2_u}} and vitals.get("FiO2") > 21
+  message: FiO2を10％下げる
+  severity: info
+  tags:
+  - a,r
+  - SpO2
+  actions:
+  - POSE_60min
+
+- id: SPO2_UPPER_NO
+  when: vitals.get("SpO2") > {{SpO2_u}} and vitals.get("FiO2", 21) <= 21 and vitals.get("NO", 0) > 0
+  message: NOを減量する
+  severity: info
+  tags:
+  - a,r
+  - SpO2
+  actions:
+  - POSE_60min
+- id: SPO2_UPPER_resolve
+  when: vitals.get("SpO2") >= {{SpO2_l}} and vitals.get("SpO2") <= {{SpO2_u}}
+  message: SpO2は基準値内に入りました
+  severity: info
+  tags:
+  - r
+  - SpO2
+- id: SPO2_UPPER_FIO2_21
+  when: vitals["FiO2"] 21  =
+  message: 窒素を使うことを検討（FiO2 18まで）
+  severity: info
+  tags:
+  - r
+  - SpO2
+  actions:
+  - POSE_60min
+  - NEXT:SPO2_UPPER_N2
+- id: SPO2_UPPER_N2
+  when: vitals["FiO2"] 20,19,18  =
+  message: 酸素濃度で酸素化をコントロールできない可能性があります。降圧の介入または基準値の変更を検討してください。
+  severity: info
+  tags:
+  - r
+  - SpO2
+- id: SPO2_LOWER
+  when: vitals.get("SpO2") < {{SpO2_l}} and vitals.get("FiO2") < 100
+  message: FiO2を10％上げる
+  severity: info
+  tags:
+  - a,r
+  - SpO2
+  actions:
+  - POSE_60min
+- id: SPO2_LOWER_resolve
+  when: vitals.get("SpO2") >= {{SpO2_l}} and vitals.get("SpO2") <= {{SpO2_u}}
+  message: SpO2は基準値内に入りました
+  severity: info
+  tags:
+  - r
+  - SpO2
+- id: SPO2_LOWER_FIO2_100
+  when: vitals.get("SpO2") < {{SpO2_l}} and vitals.get("FiO2") >= 100
+  message: NO20ppmで使用してください
+  severity: info
+  tags:
+  - r
+  - SpO2
+  actions:
+  - POSE_60min
+  - NEXT:SPO2_LOWER_NO_20
+- id: SPO2_LOWER_NO_20
+  when: vitals.get("SpO2") < {{SpO2_l}} and vitals.get("FiO2") >= 100 and vitals.get("NO", 0) >= 20
+  message: 酸素やNOで酸素化をコントロールできない可能性があります。昇圧の検討または基準値を変更してください。
+  severity: info
+  tags:
+  - r
+  - SpO2
+- id: CRIT_SpO2_ACUTE_UPPER
+  when: "vitals['SpO2'] > {{Critical_SpO2_u}} and vitals['SpO2'] < {{SpO2_u}}"
+  message: 'Critical_SpO2_u<SpO2はSpO2<SpO2_uになるまで直ちにFiO2を下げ、NOを減量または中止してください'
+  severity: info
+  tags:
+  - a
+  - SpO2
+  - critical_SpO2_u
+  actions:
+  - POSE_10min
+  - NEXT:CRIT_SpO2_REEVAL_UPPER
+
+- id: CRIT_SpO2_REEVAL_UPPER
+  when: "vitals['SpO2'] > {{Critical_SpO2_u}} and vitals['SpO2'] < {{SpO2_u}}"
+  message: 窒素使用またはCritical_SpO2_uの基準値を変更することを検討してください
+  severity: info
+  tags:
+  - r
+  - SpO2
+  - critical_SpO2_u
+- id: CRIT_UPPER_SpO2_REEVAL_UPPER_CRIT_CVP_UPPER
+  when: >
+    vitals['SpO2'] > {{Critical_SpO2_u}} and vitals['SpO2'] < {{SpO2_u}} and
+    vitals['CVP'] > {{CVP_c}}
+  message: 上級医コール, ハイフローショック対応表示，急性心不全対応表示
+  severity: info
+  tags:
+  - r
+  - SpO2
+  - critical_SpO2_u
+  actions:
+  - POSE_15min
+- id: CRIT_UPPER_SpO2_REEVAL_UPPER_CVP_UPPER_UPPER
+  when: >
+    vitals['SpO2'] > {{Critical_SpO2_u}} and vitals['SpO2'] < {{SpO2_u}} and
+    vitals['CVP'] > {{CVP_u}} and vitals['SBP'] > {{SBP_u}}
+  message: ハイフロー兆候対応表示，急性心不全対応表示
+  severity: info
+  tags:
+  - r
+  - SpO2
+  - critical_SpO2_u
+  actions:
+  - POSE_10min
+- id: CRIT_UPPER_SpO2_REEVAL_UPPER_CVP_UPPER_LOWER
+  when: >
+    vitals['SpO2'] > {{Critical_SpO2_u}} and vitals['SpO2'] < {{SpO2_u}} and
+    vitals['CVP'] > {{CVP_u}} and vitals['SBP'] < {{SBP_l}}
+  message: ハイフロー進行注意、経過観察可能
+  severity: info
+  tags:
+  - r
+  - SpO2
+  - critical_SpO2_u
+  actions:
+  - POSE_10min
+- id: CRIT_UPPER_SpO2_REEVAL_LOWER_CVP_UPPER_UPPER
+  when: >
+    vitals['SpO2'] < {{Critical_SpO2_l}} and vitals['CVP'] > {{CVP_u}} and
+    vitals['SBP'] > {{SBP_u}}
+  message: O2では心不全を解除できない、別の心不全治療方法を検討してください
+  severity: info
+  tags:
+  - r
+  - SpO2
+  - critical_SpO2_l
+- id: CRIT_UPPER_SpO2_REEVAL_LOWER_CVP_UPPER_LOWER
+  when: >
+    vitals['SpO2'] < {{Critical_SpO2_l}} and vitals['CVP'] > {{CVP_u}} and
+    vitals['SBP'] < {{SBP_l}}
+  message: O2に心不全治療が反応しています。ハイフローに引き続き注意してください
+  severity: info
+  tags:
+  - r
+  - SpO2
+  - critical_SpO2_l
+- id: CRIT_SpO2_ACUTE_LOWER
+  when: "vitals['SpO2'] < {{Critical_SpO2_l}}"
+  message: 'Critical_SpO2_l>SpO2はSpO2_l<SpO2になるまでFiO2を上げ、NOを増量または再開し、気道閉塞パネルを起動して気道トラブルの有無と改善を図ってください'
+  severity: info
+  tags:
+  - a
+  - SpO2
+  - critical_SpO2_l
+  actions:
+  - POSE_10min
+  - NEXT:CRIT_SpO2_REEVAL_LOWER
+- id: CRIT_SpO2_REEVAL_LOWER
+  when: "vitals['SpO2'] < {{Critical_SpO2_l}}"
+  message: NO使用またはCritical_SpO2_lの基準値を変更することを検討してください
+  severity: info
+  tags:
+  - r
+  - SpO2
+  - critical_SpO2_l
+- id: SBP_UPPER_CRIT_CVP_UPPER_A
+  when: value > {{CVP_u}}
+  message: 上級医コール,フロセミド20mg IV（打ったかどうかを確認する），瀉血を検討。開胸，蘇生に進む可能性も考慮してください。
+  severity: info
+  tags:
+  - a
+  - SBP_UPPER
+  actions:
+  - POSE_15min
+  - NEXT:SBP_UPPER_CRIT_CVP_UPPER_R，SBP_LOWER_CRIT_CVP_UPPER_R, SBP_UPPER_CRIT_CVP_LOWER,
+    SBP_LOWER_CRIT_CVP_LOWER
+- id: SBP_UPPER_CRIT_CVP_UPPER_R
+  when: value > {{CVP_u}}
+  message: CVP1低下するまで瀉血
+  severity: info
+  tags:
+  - r
+  - SBP_UPPER
+  actions:
+  - POSE_15min
+- id: SBP_LOWER_CRIT_CVP_UPPER_R
+  when: value > {{CVP_u}}
+  message: ボスミン流量を0.03-0.05μg/kg/min増量、タンポナーデをエコーでチェックしてください。開胸・ＥＣＭＯ・蘇生行為の可能性があります。
+  severity: info
+  tags:
+  - r
+  - SBP_LOWER
+  actions:
+  - POSE_15min
+- id: SBP_UPPER_CRIT_CVP_LOWER
+  when: value < {{CVP_u}}
+  message: 急変リスクは減少しましたが、ピトレシン・ハンプを調整して降圧を考慮してください。
+  severity: info
+  tags:
+  - r
+  - SBP_UPPER
+  actions:
+  - POSE_15min
+- id: SBP_LOWER_CRIT_CVP_LOWER
+  when: value < {{CVP_u}}
+  message: ボスミンを0.03μg/kg/min増量してください
+  severity: info
+  tags:
+  - r
+  - SBP_LOWER
+  actions:
+  - POSE_15min
+- id: CVP_UPPER_CHECK
+  when: value > {{CVP_u}}
+  message: CVPの値が正しいかチェックしてください：ライン閉塞・空気混入・トランスデューサの高さ調整
+  severity: info
+  tags:
+  - a
+  - CVP
+  actions:
+  - POSE_0min
+- id: CVP_UPPER_CHECK_Y
+  when: "vitals.get('CVP_LINE_CHECK') == 'Y' and vitals.get('CVP') > {{CVP_u}}"
+  message: 心エコーでタンポナーデと房室弁逆流、心臓の動きをチェック
+  severity: info
+  tags:
+  - a,r
+  - CVP_LINE_CHECK
+  actions:
+  - POSE_30min
+  - NEXT:CVP_UPPER_A_SBP_UPPER
+  - NEXT:CVP_UPPER_A_SBP_LOWER
+- id: CVP_UPPER_A_SBP_UPPER
+  when: "vitals.get('CVP') > {{CVP_u}} and vitals.get('SBP') > {{SBP_u}}"
+  message: フロセミドIV
+  severity: info
+  tags:
+  - a,r
+  - CVP
+  - SBP
+  actions:
+  - POSE_10min
+  - NEXT:CVP_FRO_CHECK
+- id: CVP_UPPER_A_SBP_LOWER
+  when: "vitals['CVP'] > {{CVP_u}} and vitals['SBP'] < {{SBP_l}}"
+  message: エコーをしてタンポナーデをチェック
+  severity: info
+  tags:
+  - a,r
+  - SBP
+  - CVP
+  actions:
+  - POSE_60min
+  - NEXT:CVP_TAMPO_YまたはCVP_TAMPO_N
+- id: CVP_TAMPO_Y
+  when: Y
+  message: ドレーンをミルキングして解除されなければ上級医コール、開胸ドレナージの準備
+  severity: info
+  tags:
+  - r
+  - タンポナーデチェック
+  actions:
+  - POSE_60min
+  - NEXT:なし
+- id: CVP_TAMPO_N
+  when: N
+  message: アドレナリンおよびドブタミンの増量をしてください
+  severity: info
+  tags:
+  - r
+  - タンポナーデチェック
+  actions:
+  - POSE_60min
+  - NEXT:なし
+- id: CVP_FRO_CHECK
+  when: 'True'
+  message: フロセミドの効果はありましたか？
+  severity: info
+  tags:
+  - r
+  - フロセミドチェック
+  actions:
+  - NEXT:CVP_FRO_YES, CVP_FRO_NO
+- id: CVP_FRO_YES
+  when: Y
+  message: 経過観察してください。ＣＶＰの基準値を僧帽弁逆流・三尖弁逆流・心室の動きをエコーで見て変更することを考慮してください。
+  severity: info
+  tags:
+  - r
+  - フロセミドチェック
+- id: CVP_FRO_NO
+  when: N
+  message: 輸血量を減らすことを検討してください。ＣＶＰの基準値を僧帽弁逆流・三尖弁逆流・心室の動きをエコーで見て変更することを考慮してください。
+  severity: info
+  tags:
+  - r
+  - フロセミドチェック
+- id: CVP_LOWER_A_SBP_UPPER
+  when: vitals["CVP"] < {{CVP_u}} and vitals["SBP"] > {{SBP_u}}
+  message: 心エコー：房室弁逆流みてSBP基準値変更
+  severity: info
+  tags:
+  - a
+  - SBP
+  - CVP
+  actions:
+  - POSE_60min
+  - NEXT:なし
+- id: CVP_LOWER_A_SBP_LOWER
+  when: vitals["CVP"] < {{CVP_u}} and vitals["SBP"] < {{SBP_l}}
+  message: 出血チェック
+  severity: info
+  tags:
+  - a
+  - SBP
+  - CVP
+  actions:
+  - NEXT:CVP_LOWER_R_BLEED_Y, CVP_LOWER_R_BLEED_N
+- id: CVP_LOWER_R_BLEED_Y
+  when: vitals.get("CVP", 0) < {{CVP_u}} and vitals.get("SBP", 0) < {{SBP_l}} and vitals.get("drain_ml", 0) >= 10
+  message: RBC＝FFP＋PCを目安に、出血と同量になるように投与
+  severity: info
+  tags:
+  - r
+  - CVP
+  actions:
+  - NEXT:なし
+- id: CVP_LOWER_R_BLEED_N
+  when: vitals.get("CVP", 0) < {{CVP_u}} and vitals.get("SBP", 0) < {{SBP_l}} and vitals.get("drain_ml", 0) < 10
+
+  severity: info
+  tags:
+  - r
+  - CVP
+  actions:
+  - NEXT:なし
+- id: AD_U_02
+  when: value == 0.2
+  message: これ以上アドレナリンは上げられません。開胸またはECMOの準備をしてください。
+  severity: info
+  tags:
+  - r
+  - AD
+  actions:
+  - NEXT:なし
+- id: AD_U_01_019
+  when: value == 0.1-0.19
+  message: 上級医コール,開胸またはECMOの準備をしてください。
+  severity: info
+  tags:
+  - r
+  - AD
+  actions:
+  - NEXT:なし
+- id: AD_U_0_009
+  when: value == 0-0.09
+  message: アドレナリン0.03μg/kg/min増量してください
+  severity: info
+  tags:
+  - r
+  - AD
+  actions:
+  - NEXT:なし
+- id: AD_0
+  when: value == 0
+  message: DOB減量考慮
+  severity: info
+  tags:
+  - r
+  - AD
+  actions:
+  - NEXT:なし
+- id: AD_OTHER
+  when: value == 0.01-0.2
+  message: アドレナリン0.01μg/kg/min減量してください
+  severity: info
+  tags:
+  - r
+  - AD
+  actions:
+  - NEXT:なし
+- id: DOB_1_10
+  when: value == 1~10
+  message: DOBを1μg/kg/min減量してください
+  severity: info
+  tags:
+  - r
+  - DOB
+  actions:
+  - NEXT:なし
+- id: DOB0
+  when: value == 0
+  message: なし
+  severity: info
+  tags:
+  - r
+  - DOB
+  actions:
+  - NEXT:なし
+- id: BPDOWN_R
+  when: 'True'
+  message: Vaso,hANP,CONT入力を促す
+  severity: info
+  tags:
+  - r
+  - CALL
+  actions:
+  - POSE_60min
+  - NEXT:すぐにVASO_LOW_HANP_LOW, VASO_LOW_HANP_MID, VASO_LOW_HANP_HIGHT_CONT_LOW, VASO_LOW_HANP_HIGH_CONT_MID,
+    VASO_LOW_HANP_HIGH_CONT_HIGH, VASO_HIGHを起動
+- id: BPDOWN_A
+  when: 'True'
+  message: Vaso,hANP,CONT入力を促す
+  severity: info
+  tags:
+  - a
+  - CALL
+  actions:
+  - POSE_60min
+  - NEXT:すぐにVASO_LOW_HANP_LOW, VASO_LOW_HANP_MID, VASO_LOW_HANP_HIGHT_CONT_LOW, VASO_LOW_HANP_HIGH_CONT_MID,
+    VASO_LOW_HANP_HIGH_CONT_HIGH, VASO_HIGHを起動
+- id: VASO_LOW_HANP_LOW
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.05,0.02
+  message: hANPを0.1に増量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_MID
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.1
+  message: hANPを0.2に増量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_HIGH_CONT_LOW
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.2 and vitals["CONT"] == 0,0.05
+  message: コントミンを0.1mg/kg/hへ増量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_HIGH_CONT_MID
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.2 and vitals["CONT"] == 0.10,0.15
+  message: コントミンを0.2mg/kg/hへ増量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_LOW_HANP_HIGH_CONT_HIGH
+  when: value == 0,0.01,0.02 and vitals["HANP"] == 0.2 and vitals["CONT"] == 0.2
+  message: 通常の方法で降圧することは不能です。上級医コールまたは基準値の変更を考慮してください。
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: VASO_HIGH
+  when: value == 0.03-0.2
+  message: Vasoを0.01または0.02U/kg/h減量
+  severity: info
+  tags:
+  - r
+  - VASO
+  actions:
+  - NEXT:なし
+- id: BLEED
+  when: vitals.get("drain_ml", 0) >= 10
+  message: ドレーンに10mL以上の入力がありました。必要に応じてドレーンパネルを開いてください。
+  severity: info
+  tags:
+  - r
+  - CALL
+  actions:
+  - NEXT:すぐにPROPERTY_1,2,3へ
+- id: PROPERTY_1
+  when: value == 1
+  message: 出血が継続している可能性があります、ドレーンの色を入力してください（鮮血：A,静脈血様：B，浸出液の混じる赤：C）
+  severity: info
+  tags:
+  - r
+  - PROPERTY
+  actions:
+  - NEXT:すぐにCOLOR_A,B,Cへ
+- id: PROPERTY_2
+  when: value == 2
+  message: プロタミンIV検討、ドレーンの色を入力してください（鮮血：A,静脈血様：B，浸出液の混じる赤：C）
+  severity: info
+  tags:
+  - r
+  - PROPERTY
+  actions:
+  - NEXT:すぐにCOLOR_A,B,Cへ
+- id: PROPERTY_3
+  when: value == 3
+  message: 経過観察
+  severity: info
+  tags:
+  - r
+  - PROPERTY
+  actions:
+  - NEXT:なし
+- id: COLOR_A
+  when: value == A
+  message: 動脈からの出血の可能性があります,すぐに出血量入力画面へ
+  severity: info
+  tags:
+  - r
+  - COLOR
+  actions:
+  - NEXT:すぐにMOUNT＿A,B,Cへ
+- id: COLOR_B
+  when: value == B
+  message: 胸骨および肺動脈・静脈からの出血の可能性があります,すぐに出血量入力画面へ
+  severity: info
+  tags:
+  - r
+  - COLOR
+  actions:
+  - NEXT:すぐにMOUNT＿A,B,Cへ
+- id: COLOR_C
+  when: value == C
+  message: 経過観察
+  severity: info
+  tags:
+  - r
+  - COLOR
+  actions:
+  - NEXT:なし
+- id: MOUNT_S
+  when: value == S
+  message: 経過観察，輸血量決定プロセスを起動してください
+  severity: info
+  tags:
+  - r
+  - MOUNT
+  actions:
+  - NEXT:すぐにTRANSFUSION_S, Lを起動
+- id: MOUNT_M
+  when: value == M
+  message: 出血量が中程度あります。ミルキングを30分～1時間ごとに行ってください。PCのオーダーを検討してください。輸血量決定プロセスを起動してください
+  severity: info
+  tags:
+  - r
+  - MOUNT
+  actions:
+  - NEXT:すぐにTRANSFUSION_S, Lを起動
+- id: MOUNT_L
+  when: value == L
+  message: 止血術が必要な可能性があります。上級医コール。PCの輸血を検討してください。輸血量決定プロセスを起動
+  severity: info
+  tags:
+  - r
+  - MOUNT
+  actions:
+  - NEXT:すぐにTRANSFUSION_S, Lを起動
+- id: TRANSFUSION_S
+  when: vitals["MOUNT"] == S
+  message: 尿量ー他輸液量＝RBC＋FFP＋PCとなるようにRBC/FFP/PC=1:1:1
+  severity: info
+  tags:
+  - r
+  - CALL
+- id: TRANSFUSION_L
+  when: vitals["MOUNT"] == M,L
+  message: 尿量ー他輸液量＝RBC＋FFP＋PCとなるようにRBC/FFP/PC=2:1:1
+  severity: info
+  tags:
+  - r
+  - CALL

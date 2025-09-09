@@ -1,0 +1,10 @@
+{
+  "classes": [
+    "no",
+    "yes"
+  ],
+  "img_h": 128,
+  "img_w": 512,
+  "threshold": 0.9755615592002869,
+  "target_recall": 0.98
+}
