@@ -488,7 +488,7 @@ def ocr_vitals_from_image(image_path):
 ALL_COLUMNS = [
     "SBP", "DBP", "MAP", "HR", "SpO2", "BSR1", "BSR2", "Tskin", "Trect", "etCO2",
     "RR", "Ppeak", "Pmean", "PEEPact", "RRact", "I_E", "FiO2", "VTe", "VTi",
-    "PEEPset", "VTset", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
+    "PEEPset", "VTset", "VentMode", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
     "Ca", "Glu", "Lac", "tBil", "HCO3", "BE", "Alb"
 ]
 
