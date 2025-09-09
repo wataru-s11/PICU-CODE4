@@ -21,17 +21,20 @@ BASE_COORDS = {
     "sRR":   ( 318, 508,  52, 32),
     "TV":    ( 397, 506,  50, 33),
     "Ti":    ( 630, 506,  61, 32),
+    "VentMode": (109, 35, 143, 27),
 }
 
-BED_WIDTH = 1920
-BED_HEIGHT = 1080
+# 4画面表示では上下2ベッド構成で、下ベッドは y 座標が +540 シフトされる。
+BED_Y_OFFSET = 540
 
-def _shift(coord, dx, dy):
+
+def _shift_y(coord, dy):
     x, y, w, h = coord
-    return (x + dx, y + dy, w, h)
+    return (x, y + dy, w, h)
 
-def _build_bed(dx, dy):
-    b = {k: _shift(v, dx, dy) for k, v in BASE_COORDS.items()}
+
+def _build_bed(dy):
+    b = {k: _shift_y(v, dy) for k, v in BASE_COORDS.items()}
     return {
         "BP_COMBINED_COORD": b["BP"],
         "CVP_COORDS": b["CVP"],
@@ -55,12 +58,15 @@ def _build_bed(dx, dy):
             "RRact": b["sRR"],
             "VTset": b["TV"],
             "Ti": b["Ti"],
+            "VentMode": b["VentMode"],
         },
     }
 
+
+# ベッド番号 2・4 が上段、3・5 が下段を共有する
 BED_COORDS_4 = {
-    1: _build_bed(0, 0),
-    2: _build_bed(BED_WIDTH, 0),
-    3: _build_bed(0, BED_HEIGHT),
-    4: _build_bed(BED_WIDTH, BED_HEIGHT),
+    2: _build_bed(0),
+    3: _build_bed(BED_Y_OFFSET),
+    4: _build_bed(0),
+    5: _build_bed(BED_Y_OFFSET),
 }

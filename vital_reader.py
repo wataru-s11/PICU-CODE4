@@ -19,13 +19,6 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 try:  # pragma: no cover - optional dependency
-    from google.cloud import vision  # type: ignore
-    from google.oauth2 import service_account  # type: ignore
-except Exception:  # pragma: no cover
-    vision = None
-    service_account = None
-
-try:  # pragma: no cover - optional dependency
     import tensorflow as tf  # type: ignore
 except Exception:  # pragma: no cover
     tf = None
@@ -40,11 +33,21 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover
     Image = None
 
+try:  # pragma: no cover - optional dependency
+    import easyocr  # type: ignore
+except Exception:  # pragma: no cover
+    easyocr = None
+
+if easyocr:
+    easyocr_reader = easyocr.Reader(['en', 'ja'], gpu=torch.cuda.is_available(), verbose=False)
+else:  # pragma: no cover - easyocr not available
+    easyocr_reader = None
+
 from bed_coords import BED_COORDS_8
 from bed_coords_4 import BED_COORDS_4
 
+# Optional ML model for CVP and other analyses
 cvp_model = None
-client = None
 # Optional model and metadata for spontaneous-breathing detection (may be None)
 spont_breath_model = None
 spont_breath_meta = None
@@ -170,11 +173,6 @@ def resolve_path(arg_val, env_name, config, key, candidates=None, must_exist=Tru
 DEFAULT_CVP_MODEL_CANDIDATES = [
     r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\CVP2\\cvp_model.keras",
 ]
-DEFAULT_SA_JSON_CANDIDATES = [
-    "ocr-project-1-458704-e25577dc4ea2.json",
-    str(Path(__file__).with_name("ocr-project-1-458704-e25577dc4ea2.json")),
-    r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\ocr-project-1-458704-e25577dc4ea2.json",
-]
 DEFAULT_IMAGE_BASE_CANDIDATES = [
     r"Z:\\image",
 ]
@@ -196,23 +194,17 @@ DEFAULT_SPONT_BREATH_META_CANDIDATES = [
 
 def init_resources(
     model_path: Path,
-    service_account_file: Path,
     spont_breath_model_path: Optional[Path] = None,
     spont_breath_meta_path: Optional[Path] = None,
 ):
-    """Load optional heavy resources such as ML models and the Vision client."""
+    """Load optional heavy resources such as ML models."""
 
-    global cvp_model, client, spont_breath_model, spont_breath_meta, spont_breath_transform
+    global cvp_model, spont_breath_model, spont_breath_meta, spont_breath_transform
     try:
         print(f"Loading CVP model from: {model_path}")
         cvp_model = tf.keras.models.load_model(str(model_path))
     except Exception as e:
         raise RuntimeError(f"CVPモデル読み込み失敗: {model_path} -> {e}")
-    try:
-        credentials = service_account.Credentials.from_service_account_file(str(service_account_file))
-        client = vision.ImageAnnotatorClient(credentials=credentials)
-    except Exception as e:
-        raise RuntimeError(f"Google Vision初期化失敗: {service_account_file} -> {e}")
 
 
 
@@ -231,7 +223,6 @@ def parse_args():
         "--spont-breath-meta",
         help="Path to spontaneous-breathing model metadata (JSON)",
     )
-    parser.add_argument("--service-account-file", help="Path to Google Cloud service account JSON")
     parser.add_argument("--image-folder", help="Folder containing monitor images (親Z:\\imageでもOK)")
     parser.add_argument("--vitals-base", help="Folder to store CSVs (親フォルダ)。未指定なら自動推定")
     parser.add_argument("--config", help="Path to config JSON file")
@@ -333,7 +324,7 @@ def select_display_and_bed(vitals_base_dir: Path):
             break
         messagebox.showerror("エラー", "4または8を入力してください。", parent=root)
 
-    valid_beds = ["1", "2", "3", "4"] if display == "4" else ["2", "3", "4", "5"]
+    valid_beds = ["2", "3", "4", "5"]
     while True:
         bed_choice = simpledialog.askstring(
             "ベッド選択",
@@ -355,38 +346,153 @@ def select_display_and_bed(vitals_base_dir: Path):
 # 画像処理・OCR
 # =========================
 
-def contrast_brightness(image, contrast=2.0, brightness=30):
-    return cv2.convertScaleAbs(image, alpha=contrast, beta=brightness)
-
 def crop_image(img, coords):
     x, y, w, h = coords
-    return img[y:y+h, x:x+w]
+    return img[y:y + h, x:x + w]
 
-def enhance_red_text(img):
-    b, g, r = cv2.split(img)
-    red_enhanced = cv2.merge([np.zeros_like(b), np.zeros_like(g), r])
-    return cv2.convertScaleAbs(red_enhanced, alpha=2, beta=0)
 
-def ocr_google_vision(img):
-    _, encoded_image = cv2.imencode(".png", img)
-    image = vision.Image(content=encoded_image.tobytes())
-    response = client.text_detection(image=image)
-    texts = response.text_annotations
-    return texts[0].description.strip().replace("\n", "") if texts else ""
+def upsharp_gray(bgr, scale=3):
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    if scale != 1:
+        g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    blur = cv2.GaussianBlur(g, (0, 0), 1.0)
+    return cv2.addWeighted(g, 1.4, blur, -0.4, 0)
 
-def parse_bp_map(text):
-    text = text.replace(" ", "").replace("O", "0")
-    match = re.search(r"(\d{2,3})[\/](\d{2,3})[\(（](\d{2,3})[\)）]?", text)
-    if match:
-        return match.group(1), match.group(2), match.group(3)
-    match = re.search(r"(\d{4})[\(（](\d{2,3})[\)）]?", text)
-    if match:
-        return match.group(1)[:2], match.group(1)[2:], match.group(2)
-    return None, None, None
 
-def sharpen(img):
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    return cv2.filter2D(img, -1, kernel)
+def to_bin(gray):
+    return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+
+
+def read_easy(img, allow):
+    if easyocr_reader is None:
+        return "", 0.0
+    res = easyocr_reader.readtext(img, detail=1, paragraph=False, allowlist=allow)
+    if not res:
+        return "", 0.0
+    res = sorted(res, key=lambda r: min(p[0] for p in r[0]))
+    texts, confs = [], []
+    for _, text, conf in res:
+        t = ''.join(ch for ch in text if ch in allow)
+        if t:
+            texts.append(t)
+            confs.append(float(conf))
+    return ''.join(texts), (sum(confs) / len(confs) if confs else 0.0)
+
+
+def best_of(cands):
+    best, score = "", -1
+    for s, c in cands:
+        s2 = s.replace('O', '0').replace('o', '0').strip()
+        sc = c + len(s2)
+        if sc > score:
+            best, score = s2, sc
+    return best
+
+
+ALLOW_NUM = '0123456789'
+ALLOW_NUM_DOT = '0123456789.'
+ALLOW_BP = '0123456789()/'
+ALLOW_IE = '0123456789:.'
+ALLOW_MODE_ASC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/()+-=<> '
+
+PAT_BP = re.compile(r'(\d{2,3})/(\d{2,3})\(?([0-9]{2,3})\)?')
+
+
+def read_bp_roi(roi):
+    red = cv2.subtract(roi[:, :, 2], cv2.max(roi[:, :, 0], roi[:, :, 1]))
+    red = cv2.normalize(red, None, 0, 255, cv2.NORM_MINMAX)
+    red = cv2.resize(red, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    red = cv2.addWeighted(red, 1.4, cv2.GaussianBlur(red, (0, 0), 1.0), -0.4, 0)
+    t1, c1 = read_easy(red, ALLOW_BP)
+    t2, c2 = read_easy(to_bin(red), ALLOW_BP)
+    raw = best_of([(t1, c1), (t2, c2)])
+    m = PAT_BP.search(raw)
+    if not m:
+        m2 = re.search(r'(\d{4})\(?(\d{2,3})\)?', raw)
+        if m2:
+            return raw, m2.group(1)[:2], m2.group(1)[2:], m2.group(2)
+        return raw, "", "", ""
+    return raw, m.group(1), m.group(2), m.group(3)
+
+
+def hsv_mask(bgr, low, high):
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    return cv2.inRange(hsv, np.array(low, np.uint8), np.array(high, np.uint8)), hsv[:, :, 2]
+
+
+def blue_enhance(bgr, scale=3):
+    m, v = hsv_mask(bgr, (100, 80, 40), (140, 255, 255))
+    gray = cv2.bitwise_and(v, v, mask=m)
+    if scale != 1:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    return cv2.addWeighted(gray, 1.6, cv2.GaussianBlur(gray, (0, 0), 1.0), -0.6, 0)
+
+
+def orange_enhance(bgr, scale=3):
+    m1, v = hsv_mask(bgr, (10, 80, 40), (25, 255, 255))
+    m2, _ = hsv_mask(bgr, (25, 60, 40), (35, 255, 255))
+    m = cv2.max(m1, m2)
+    gray = cv2.bitwise_and(v, v, mask=m)
+    if scale != 1:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    return cv2.addWeighted(gray, 1.5, cv2.GaussianBlur(gray, (0, 0), 1.0), -0.5, 0)
+
+
+def read_cvp_roi(roi):
+    blue = blue_enhance(roi, 3)
+    t1, c1 = read_easy(blue, ALLOW_NUM + '()')
+    t2, c2 = read_easy(to_bin(blue), ALLOW_NUM + '()')
+    raw = best_of([(t1, c1), (t2, c2)])
+    m = re.search(r'\(?([0-9]{1,2})\)?', raw)
+    return m.group(1) if m else raw
+
+
+def normalize_temp(s):
+    m = re.search(r'(\d{2}\.\d)', s)
+    if m:
+        return m.group(1)
+    m = re.search(r'(\d{3})', s)
+    if m:
+        k = m.group(1)
+        return f"{k[:2]}.{k[2]}"
+    return ""
+
+
+def read_temp_roi(roi):
+    x = orange_enhance(roi, 3)
+    t1, c1 = read_easy(x, ALLOW_NUM_DOT)
+    t2, c2 = read_easy(to_bin(x), ALLOW_NUM_DOT)
+    return normalize_temp(best_of([(t1, c1), (t2, c2)]).replace('..', '.'))
+
+
+def read_num_roi(roi, allow_dot=True):
+    g = upsharp_gray(roi, 3)
+    b = to_bin(g)
+    allow = ALLOW_NUM_DOT if allow_dot else ALLOW_NUM
+    t1, c1 = read_easy(g, allow)
+    t2, c2 = read_easy(b, allow)
+    return best_of([(t1, c1), (t2, c2)]).strip('.')
+
+
+def read_ie_roi(roi):
+    g = upsharp_gray(roi, 3)
+    b = to_bin(g)
+    t1, c1 = read_easy(g, ALLOW_IE)
+    t2, c2 = read_easy(b, ALLOW_IE)
+    s = best_of([(t1, c1), (t2, c2)])
+    m = re.search(r'(\d+)[\.:]([0-9]+(?:\.[0-9]+)?)', s)
+    if m:
+        s = f"{m.group(1)}:{m.group(2)}"
+    s = re.sub(r'^0+', '', s)
+    return s
+
+
+def read_mode_roi(roi):
+    g = upsharp_gray(roi, 3)
+    b = to_bin(g)
+    t1, c1 = read_easy(g, ALLOW_MODE_ASC)
+    t2, c2 = read_easy(b, ALLOW_MODE_ASC)
+    return best_of([(t1, c1), (t2, c2)])
 
 
 def detect_spontaneous_breath(img, coords_list):
@@ -458,24 +564,23 @@ def ocr_vitals_from_image(image_path):
     img = cv2.imread(image_path)
     results = {}
     bp_crop = crop_image(img, BP_COMBINED_COORD)
-    bp_crop = cv2.resize(bp_crop, (bp_crop.shape[1]*2, bp_crop.shape[0]*2))
-    bp_crop = sharpen(bp_crop)
-    bp_enhanced = enhance_red_text(bp_crop)
-    bp_text = ocr_google_vision(bp_enhanced)
-    sbp, dbp, map_val = parse_bp_map(bp_text)
+    _, sbp, dbp, map_val = read_bp_roi(bp_crop)
     results['SBP'] = sbp or ''
     results['DBP'] = dbp or ''
     results['MAP'] = map_val or ''
     for key, coords in vital_crop.items():
         crop = crop_image(img, coords)
-        if key in ["VTi", "VTe"]:
-            crop = contrast_brightness(crop)
-        result = ocr_google_vision(crop)
-        if key == "I_E" and result:
-            result = re.sub(r"^0*([1-9]):0*([0-9]+(?:\.[0-9]+)?)$", r"\1:\2", result)
+        if key == "VentMode":
+            result = read_mode_roi(crop)
+        elif key in ["Tskin", "Trect"]:
+            result = read_temp_roi(crop)
+        elif key == "I_E":
+            result = read_ie_roi(crop)
+        else:
+            result = read_num_roi(crop, allow_dot=True)
         results[key] = result
     cvp_crop = crop_image(img, CVP_COORDS)
-    results['CVP'] = predict_cvp_from_image(cvp_crop)
+    results['CVP'] = read_cvp_roi(cvp_crop)
 
     if detect_spontaneous_breath(img, SPONT_BREATH_COORDS):
         print("自発呼吸検出")
@@ -488,7 +593,7 @@ def ocr_vitals_from_image(image_path):
 ALL_COLUMNS = [
     "SBP", "DBP", "MAP", "HR", "SpO2", "BSR1", "BSR2", "Tskin", "Trect", "etCO2",
     "RR", "Ppeak", "Pmean", "PEEPact", "RRact", "I_E", "FiO2", "VTe", "VTi",
-    "PEEPset", "VTset", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
+    "PEEPset", "VTset", "VentMode", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
     "Ca", "Glu", "Lac", "tBil", "HCO3", "BE", "Alb"
 ]
 
@@ -612,14 +717,6 @@ if __name__ == "__main__":
         )
     except ValueError:
         spont_breath_meta_path = None
-    service_account_file = resolve_path(
-        args.service_account_file,
-        "SERVICE_ACCOUNT_FILE",
-        config,
-        "SERVICE_ACCOUNT_FILE",
-        candidates=DEFAULT_SA_JSON_CANDIDATES,
-        must_exist=True,
-    )
     image_folder = resolve_path(
         args.image_folder,
         "IMAGE_FOLDER",
@@ -640,11 +737,10 @@ if __name__ == "__main__":
     print(f"[PATH] CVP_MODEL_PATH = {cvp_model_path}")
     print(f"[PATH] SPONT_BREATH_MODEL_PATH = {spont_breath_model_path}")
     print(f"[PATH] SPONT_BREATH_META_PATH = {spont_breath_meta_path}")
-    print(f"[PATH] SERVICE_ACCOUNT_FILE = {service_account_file}")
     print(f"[PATH] IMAGE_FOLDER(base) = {image_folder}")
     print(f"[PATH] VITALS_BASE_DIR = {vitals_base_dir}")
 
-    init_resources(cvp_model_path, service_account_file, spont_breath_model_path, spont_breath_meta_path)
+    init_resources(cvp_model_path, spont_breath_model_path, spont_breath_meta_path)
 
     # ==== 表示モード & ベッド選択 ====
     display_mode, VITALS_PATH, bed_num = select_display_and_bed(vitals_base_dir)
