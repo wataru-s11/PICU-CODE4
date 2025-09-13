@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import argparse
 import json
+import socket
 from typing import Optional
 try:  # pragma: no cover - optional dependency
     import numpy as np  # type: ignore
@@ -226,6 +227,10 @@ def parse_args():
     parser.add_argument("--image-folder", help="Folder containing monitor images (親Z:\\imageでもOK)")
     parser.add_argument("--vitals-base", help="Folder to store CSVs (親フォルダ)。未指定なら自動推定")
     parser.add_argument("--config", help="Path to config JSON file")
+    parser.add_argument(
+        "--beds",
+        help="Comma-separated bed numbers to allow. Overrides host-based default.",
+    )
     return parser.parse_args()
 
 # =========================
@@ -305,8 +310,12 @@ def create_empty_vitals_csv(path):
         df.to_csv(path, index=False, encoding="utf-8-sig")
         print(f"[INFO] 空のバイタルCSVを作成: {path}")
 
-def select_display_and_bed(vitals_base_dir: Path):
-    """画面分割(4 or 8)とベッド番号を聞いてCSVパスとともに返す"""
+def select_display_and_bed(vitals_base_dir: Path, beds_override: Optional[list[str]] = None):
+    """画面分割(4 or 8)とベッド番号を聞いてCSVパスとともに返す
+
+    ホスト名に応じてベッド候補を切り替える。`beds_override` が指定された場合は
+    それを優先する。
+    """
     import tkinter as tk
     from tkinter import simpledialog, messagebox
 
@@ -324,7 +333,16 @@ def select_display_and_bed(vitals_base_dir: Path):
             break
         messagebox.showerror("エラー", "4または8を入力してください。", parent=root)
 
-    valid_beds = ["2", "3", "4", "5"]
+    host = socket.gethostname()
+    if beds_override is not None:
+        valid_beds = beds_override
+    elif host == "ws-PC1":
+        valid_beds = ["2", "3"]
+    elif host == "Super-WS":
+        valid_beds = ["4", "5"]
+    else:
+        valid_beds = ["2", "3", "4", "5"]
+
     while True:
         bed_choice = simpledialog.askstring(
             "ベッド選択",
@@ -742,8 +760,18 @@ if __name__ == "__main__":
 
     init_resources(cvp_model_path, spont_breath_model_path, spont_breath_meta_path)
 
+    beds_override = None
+    if args.beds:
+        beds_override = [b.strip() for b in args.beds.split(",") if b.strip()]
+    else:
+        env_beds = os.getenv("VALID_BEDS")
+        if env_beds:
+            beds_override = [b.strip() for b in env_beds.split(",") if b.strip()]
+
     # ==== 表示モード & ベッド選択 ====
-    display_mode, VITALS_PATH, bed_num = select_display_and_bed(vitals_base_dir)
+    display_mode, VITALS_PATH, bed_num = select_display_and_bed(
+        vitals_base_dir, beds_override
+    )
     print(f"選択された画面分割: {display_mode}")
     print(f"選択されたベッド番号: {bed_num}")
     print(f"保存先CSV: {VITALS_PATH}")
