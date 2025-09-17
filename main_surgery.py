@@ -3,6 +3,7 @@ try:  # pandas は必須ではなく、利用可能な場合のみ読み込む
 except Exception:  # pragma: no cover - pandas が無い環境でも動作させる
     pd = None  # type: ignore
 import time
+import math
 from datetime import datetime
 import tkinter as tk
 from tkinter import simpledialog, messagebox
@@ -367,6 +368,24 @@ def handle_cvp_observation_comment(vitals_memory):
         return "僧帽弁逆流・三尖弁逆流と両心室の動きをみてCVPの基準値を変えてください"
     return ""
 
+
+def update_furosemide_flags(vitals, vitals_memory):
+    """Update memory flags when a new furosemide IV bolus is logged."""
+
+    raw = vitals.get("furosemide_mg")
+    try:
+        dose = float(raw)
+    except (TypeError, ValueError):
+        return
+
+    if math.isnan(dose) or dose <= 0:
+        return
+
+    entry_key = (vitals.get("timestamp"), dose)
+    if entry_key != vitals_memory.get("FRO_LAST_DOSE_ENTRY"):
+        vitals_memory["FRO_LAST_DOSE_ENTRY"] = entry_key
+        vitals_memory["FRO_DOSE_LOGGED"] = True
+
 # ---------------- ベッド選択＆CSVパス解決 ----------------
 
 def select_bed_and_csv(vitals_base_dir: Path) -> Path:
@@ -423,6 +442,8 @@ def main_loop(
         "SPO2_CHECK_PAUSE_UNTIL": None,
         "CVP_OBS_COUNT": 0,
         "FRO_CVP_BASE": None,
+        "FRO_DOSE_LOGGED": False,
+        "FRO_LAST_DOSE_ENTRY": None,
     }
     print("\n==== 自動判定を開始（Ctrl+Cで終了）====")
     while True:
@@ -435,6 +456,8 @@ def main_loop(
         print("【判定直前バイタル】", vitals)
 
         surgery_type = SURGERY_STATE.get("type", "根治術")
+
+        update_furosemide_flags(vitals, vitals_memory)
 
         # 状態注入
         for key in vitals_memory:
@@ -658,6 +681,9 @@ def main_loop(
 
                 # フロセミド効果チェック（1回だけY/N取得）
                 if _id == 'CVP_FRO_CHECK' and not vitals_memory.get('FRO_CHECK_ASKED'):
+                    if not vitals_memory.get('FRO_DOSE_LOGGED'):
+                        last_instruction_time[_id] = now_ts
+                        continue
                     ans = yn_dialog("フロセミド効果チェック", inst['instruction'])
                     vitals_memory['FRO_CHECK'] = ans
                     vitals_memory['FRO_CHECK_ASKED'] = True
@@ -681,6 +707,8 @@ def main_loop(
                         vitals_memory['EPISODE_LATCH'].add('CVP_FRO_NO')
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
                     vitals_memory['FRO_CVP_BASE'] = None
+                    vitals_memory['FRO_DOSE_LOGGED'] = False
+                    vitals['FRO_DOSE_LOGGED'] = False
                     last_instruction_time[_id] = now_ts
                     continue
 
@@ -708,6 +736,7 @@ def main_loop(
             vitals_memory['EPISODE_LATCH'].clear()
             vitals_memory['FRO_CHECK_ASKED'] = False
             vitals_memory['FRO_CHECK'] = None
+            vitals_memory['FRO_DOSE_LOGGED'] = False
 
         time.sleep(60)
 
