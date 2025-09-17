@@ -416,6 +416,27 @@ ALLOW_MODE_ASC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/()+-=<> '
 PAT_BP = re.compile(r'(\d{2,3})/(\d{2,3})\(?([0-9]{2,3})\)?')
 
 
+def parse_bp_text(raw: str):
+    """Normalize and parse the SBP/DBP/MAP triple from ``raw`` text."""
+
+    sanitized = ''.join(ch for ch in raw if ch in ALLOW_BP)
+    normalized = sanitized or raw
+    match = PAT_BP.search(normalized)
+    if match:
+        return normalized, match.group(1), match.group(2), match.group(3)
+    fallback = re.search(r'(\d{4,6})\(?([0-9]{2,3})\)?', normalized)
+    if fallback:
+        digits = fallback.group(1)
+        if len(digits) <= 4:
+            sbp, dbp = digits[:2], digits[2:]
+        elif len(digits) == 5:
+            sbp, dbp = digits[:3], digits[3:]
+        else:
+            sbp, dbp = digits[:3], digits[3:]
+        return normalized, sbp, dbp, fallback.group(2)
+    return normalized, "", "", ""
+
+
 def read_bp_roi(roi):
     red = cv2.subtract(roi[:, :, 2], cv2.max(roi[:, :, 0], roi[:, :, 1]))
     red = cv2.normalize(red, None, 0, 255, cv2.NORM_MINMAX)
@@ -424,13 +445,7 @@ def read_bp_roi(roi):
     t1, c1 = read_easy(red, ALLOW_BP)
     t2, c2 = read_easy(to_bin(red), ALLOW_BP)
     raw = best_of([(t1, c1), (t2, c2)])
-    m = PAT_BP.search(raw)
-    if not m:
-        m2 = re.search(r'(\d{4})\(?(\d{2,3})\)?', raw)
-        if m2:
-            return raw, m2.group(1)[:2], m2.group(1)[2:], m2.group(2)
-        return raw, "", "", ""
-    return raw, m.group(1), m.group(2), m.group(3)
+    return parse_bp_text(raw)
 
 
 def hsv_mask(bgr, low, high):
