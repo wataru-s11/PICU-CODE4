@@ -420,6 +420,17 @@ ALLOW_MODE_ASC = (
 )
 
 PAT_BP = re.compile(r'(\d{2,3})/(\d{2,3})\(?([0-9]{2,3})\)?')
+PAT_BP_TOKEN = re.compile(r'\d+(?:\.\d+)?')
+PREFERRED_BP_SPLITS = [
+    (3, 2, 2),
+    (3, 3, 2),
+    (3, 2, 3),
+    (2, 3, 2),
+    (2, 2, 3),
+    (3, 3, 3),
+    (2, 3, 3),
+    (2, 2, 2),
+]
 
 
 VENT_MODE_CANONICAL = {
@@ -471,16 +482,52 @@ def parse_bp_text(raw: str):
     match = PAT_BP.search(normalized)
     if match:
         return normalized, match.group(1), match.group(2), match.group(3)
-    fallback = re.search(r'(\d{4,6})\(?([0-9]{2,3})\)?', normalized)
-    if fallback:
-        digits = fallback.group(1)
-        if len(digits) <= 4:
-            sbp, dbp = digits[:2], digits[2:]
-        elif len(digits) == 5:
-            sbp, dbp = digits[:3], digits[3:]
-        else:
-            sbp, dbp = digits[:3], digits[3:]
-        return normalized, sbp, dbp, fallback.group(2)
+
+    matches = list(PAT_BP_TOKEN.finditer(raw))
+    tokens = []
+    for idx, m in enumerate(matches):
+        token = m.group()
+        if '.' in token:
+            if token.endswith('.0'):
+                base = token[:-2]
+                after = raw[m.end():]
+                keep_zero = after.startswith('/')
+                if idx == 0 and len(base) <= 2:
+                    keep_zero = True
+                token = f"{base}0" if keep_zero else base
+            else:
+                token = token.replace('.', '')
+        tokens.append(token)
+
+    tokens = [tok for tok in tokens if tok]
+    if len(tokens) >= 3:
+        return normalized, tokens[0], tokens[1], tokens[2]
+
+    digits_only = ''.join(ch for ch in normalized if ch.isdigit())
+    if not digits_only:
+        digits_only = ''.join(ch for ch in raw if ch.isdigit())
+
+    if len(tokens) == 2 and tokens[0] and tokens[1]:
+        first, last = tokens
+        for sbp_len in (3, 2):
+            for dbp_len in (2, 3):
+                if sbp_len + dbp_len != len(first):
+                    continue
+                sbp = first[:sbp_len]
+                dbp = first[sbp_len:]
+                if sbp and dbp:
+                    return normalized, sbp, dbp, last
+
+    for lengths in PREFERRED_BP_SPLITS:
+        l1, l2, l3 = lengths
+        if l1 + l2 + l3 != len(digits_only):
+            continue
+        sbp = digits_only[:l1]
+        dbp = digits_only[l1:l1 + l2]
+        map_val = digits_only[l1 + l2:l1 + l2 + l3]
+        if sbp and dbp and map_val:
+            return normalized, sbp, dbp, map_val
+
     return normalized, "", "", ""
 
 
