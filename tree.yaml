@@ -289,7 +289,7 @@ rules:
   - POSE_60min
   - NEXT:なし
 - id: CVP_FRO_CHECK
-  when: 'True'
+  when: "vitals.get('FRO_DOSE_LOGGED')"
   message: フロセミドの効果はありましたか？
   severity: info
   tags:
