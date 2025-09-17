@@ -12,6 +12,7 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover
     np = None
 import re
+import unicodedata
 
 # Optional heavy dependencies -------------------------------------------------
 try:  # pragma: no cover - optional dependency
@@ -411,9 +412,55 @@ ALLOW_NUM = '0123456789'
 ALLOW_NUM_DOT = '0123456789.'
 ALLOW_BP = '0123456789()/'
 ALLOW_IE = '0123456789:.'
-ALLOW_MODE_ASC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/()+-=<> '
+ALLOW_MODE_ASC = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/()+-=<> "
+    "ァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテト"
+    "ナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンヴガギグゲゴ"
+    "ザジズゼゾダヂヅデドバビブベボパピプペポ・\u3000"
+)
 
 PAT_BP = re.compile(r'(\d{2,3})/(\d{2,3})\(?([0-9]{2,3})\)?')
+
+
+VENT_MODE_CANONICAL = {
+    "AUTO": "AUTO",
+    "AUTO MODE": "AUTO MODE",
+    "AUTOMODE": "AUTO MODE",
+}
+
+VENT_MODE_TRANSLATIONS = [
+    ("オートモード", "AUTO MODE"),
+    ("オート", "AUTO"),
+    ("モード", "MODE"),
+]
+
+
+def normalize_vent_mode_label(raw: str) -> str:
+    """Normalize raw OCR output for the ventilator mode label."""
+
+    if not raw:
+        return ""
+
+    text = unicodedata.normalize("NFKC", raw)
+    text = text.replace("\u3000", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+
+    compact = text.replace(" ", "")
+    if compact in VENT_MODE_CANONICAL:
+        return VENT_MODE_CANONICAL[compact]
+    compact_upper = compact.upper()
+    if compact_upper in VENT_MODE_CANONICAL:
+        return VENT_MODE_CANONICAL[compact_upper]
+
+    for source, target in VENT_MODE_TRANSLATIONS:
+        if source.replace(" ", "") in compact:
+            text = text.replace(source, target)
+            compact = text.replace(" ", "")
+
+    ascii_text = re.sub(r"\s+", " ", text).strip().upper()
+    return VENT_MODE_CANONICAL.get(ascii_text, ascii_text)
 
 
 def parse_bp_text(raw: str):
@@ -525,7 +572,8 @@ def read_mode_roi(roi):
     b = to_bin(g)
     t1, c1 = read_easy(g, ALLOW_MODE_ASC)
     t2, c2 = read_easy(b, ALLOW_MODE_ASC)
-    return best_of([(t1, c1), (t2, c2)])
+    raw = best_of([(t1, c1), (t2, c2)])
+    return normalize_vent_mode_label(raw)
 
 
 def detect_spontaneous_breath(img, coords_list):
