@@ -411,6 +411,7 @@ def best_of(cands):
 ALLOW_NUM = '0123456789'
 ALLOW_NUM_DOT = '0123456789.'
 ALLOW_BP = '0123456789()/'
+ALLOW_BP_OCR = '0123456789()/.'
 ALLOW_IE = '0123456789:.'
 ALLOW_MODE_ASC = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/()+-=<> "
@@ -564,15 +565,129 @@ def parse_bp_text(raw: str):
 
     return normalized, "", "", ""
 
+BP_BOUNDS = (
+    (30, 300),  # SBP is typically three digits
+    (10, 200),  # DBP rarely exceeds 200 mmHg
+    (10, 220),  # MAP values remain within this window
+)
+
+
+def _normalize_bp_component(value: str, index: int) -> str:
+    digits = re.sub(r'\D', '', value)
+    if not digits:
+        return ""
+    digits = digits.lstrip('0') or '0'
+    try:
+        numeric = int(digits)
+    except ValueError:
+        return digits
+
+    low, high = BP_BOUNDS[index]
+    if low <= numeric <= high:
+        return str(numeric)
+
+    trimmed = digits
+    for cut in range(1, len(digits)):
+        candidate = digits[cut:]
+        if not candidate:
+            break
+        candidate = candidate.lstrip('0') or '0'
+        try:
+            cand_val = int(candidate)
+        except ValueError:
+            continue
+        if low <= cand_val <= high:
+            return str(cand_val)
+
+    return str(numeric)
+
+
+def _split_digits_triplet(digits: str):
+    if not digits:
+        return None
+
+    combos = [
+        (3, 2, 2),
+        (3, 2, 3),
+        (3, 3, 2),
+        (3, 3, 3),
+        (2, 2, 2),
+        (2, 2, 3),
+        (2, 3, 2),
+        (2, 3, 3),
+    ]
+
+    length = len(digits)
+    for l1, l2, l3 in combos:
+        if l1 + l2 + l3 == length:
+            return digits[:l1], digits[l1:l1 + l2], digits[l1 + l2:]
+
+    for l1, l2, l3 in combos:
+        total = l1 + l2 + l3
+        if total > length:
+            continue
+        for start in range(0, length - total + 1):
+            segment = digits[start:start + total]
+            if len(segment) != total:
+                continue
+            return (
+                segment[:l1],
+                segment[l1:l1 + l2],
+                segment[l1 + l2:],
+            )
+
+    return None
+
+
+def parse_bp_text(raw: str):
+    """Normalize and parse the SBP/DBP/MAP triple from ``raw`` text."""
+
+    sanitized = ''.join(ch for ch in raw if ch in ALLOW_BP or ch in '. ')
+    normalized = ''.join(ch for ch in sanitized if ch in ALLOW_BP)
+
+    match = PAT_BP.search(normalized)
+    if match:
+        sbp = _normalize_bp_component(match.group(1), 0)
+        dbp = _normalize_bp_component(match.group(2), 1)
+        map_val = _normalize_bp_component(match.group(3), 2)
+        if sbp and dbp and map_val:
+            return f"{sbp}/{dbp}({map_val})", sbp, dbp, map_val
+        return normalized, sbp, dbp, map_val
+
+    decimal_tokens = re.findall(r'\d+(?:\.\d+)?', raw)
+    components = []
+    for idx, token in enumerate(decimal_tokens):
+        digits = re.sub(r'\D', '', token)
+        if not digits:
+            continue
+        if '.' in token and digits.endswith('0'):
+            if len(digits) > 3 or idx != 0:
+                digits = digits[:-1]
+        components.append(digits)
+        if len(components) == 3:
+            break
+
+    if len(components) >= 3:
+        sbp = _normalize_bp_component(components[0], 0)
+        dbp = _normalize_bp_component(components[1], 1)
+        map_val = _normalize_bp_component(components[2], 2)
+        if sbp or dbp or map_val:
+            return f"{sbp}/{dbp}({map_val})", sbp, dbp, map_val
+
+    digits_only = re.sub(r'\D', '', normalized or raw)
+    triplet = _split_digits_triplet(digits_only)
+    if triplet:
+        sbp = _normalize_bp_component(triplet[0], 0)
+        dbp = _normalize_bp_component(triplet[1], 1)
+        map_val = _normalize_bp_component(triplet[2], 2)
+        if sbp or dbp or map_val:
+            return f"{sbp}/{dbp}({map_val})", sbp, dbp, map_val
+
+    return normalized or raw, "", "", ""
+
 
 def read_bp_roi(roi):
-    red = cv2.subtract(roi[:, :, 2], cv2.max(roi[:, :, 0], roi[:, :, 1]))
-    red = cv2.normalize(red, None, 0, 255, cv2.NORM_MINMAX)
-    red = cv2.resize(red, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    red = cv2.addWeighted(red, 1.4, cv2.GaussianBlur(red, (0, 0), 1.0), -0.4, 0)
-    t1, c1 = read_easy(red, ALLOW_BP)
-    t2, c2 = read_easy(to_bin(red), ALLOW_BP)
-    raw = best_of([(t1, c1), (t2, c2)])
+
     return parse_bp_text(raw)
 
 
@@ -587,6 +702,20 @@ def blue_enhance(bgr, scale=3):
     if scale != 1:
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     return cv2.addWeighted(gray, 1.6, cv2.GaussianBlur(gray, (0, 0), 1.0), -0.6, 0)
+
+
+def red_enhance(bgr, scale=3):
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    m1 = cv2.inRange(hsv, np.array((0, 70, 40), np.uint8), np.array((10, 255, 255), np.uint8))
+    m2 = cv2.inRange(hsv, np.array((170, 70, 40), np.uint8), np.array((180, 255, 255), np.uint8))
+    mask = cv2.max(m1, m2)
+    v = hsv[:, :, 2]
+    red = cv2.bitwise_and(v, v, mask=mask)
+    if scale != 1:
+        red = cv2.resize(red, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    red = cv2.equalizeHist(red)
+    red = cv2.medianBlur(red, 3)
+    return cv2.addWeighted(red, 1.6, cv2.GaussianBlur(red, (0, 0), 1.2), -0.6, 0)
 
 
 def orange_enhance(bgr, scale=3):
