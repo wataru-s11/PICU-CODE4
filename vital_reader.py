@@ -12,6 +12,7 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover
     np = None
 import re
+import unicodedata
 
 # Optional heavy dependencies -------------------------------------------------
 try:  # pragma: no cover - optional dependency
@@ -412,9 +413,157 @@ ALLOW_NUM_DOT = '0123456789.'
 ALLOW_BP = '0123456789()/'
 ALLOW_BP_OCR = '0123456789()/.'
 ALLOW_IE = '0123456789:.'
-ALLOW_MODE_ASC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/()+-=<> '
+ALLOW_MODE_ASC = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/()+-=<> "
+    "ァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテト"
+    "ナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンヴガギグゲゴ"
+    "ザジズゼゾダヂヅデドバビブベボパピプペポ・\u3000"
+)
 
 PAT_BP = re.compile(r'(\d{2,3})/(\d{2,3})\(?([0-9]{2,3})\)?')
+PAT_BP_TOKEN = re.compile(r'\d+(?:\.\d+)?')
+PREFERRED_BP_SPLITS = [
+    (3, 2, 2),
+    (3, 3, 2),
+    (3, 2, 3),
+    (2, 3, 2),
+    (2, 2, 3),
+    (3, 3, 3),
+    (2, 3, 3),
+    (2, 2, 2),
+]
+
+
+VENT_MODE_CANONICAL = {
+    "AUTO": "AUTO",
+    "AUTO MODE": "AUTO MODE",
+    "AUTOMODE": "AUTO MODE",
+}
+
+VENT_MODE_TRANSLATIONS = [
+    ("オートモード", "AUTO MODE"),
+    ("オート", "AUTO"),
+    ("モード", "MODE"),
+]
+
+PRESSURE_SUPPORT_MODE_TOKENS = {
+    "PS",
+    "PSV",
+    "SPONT",
+    "SPONTANEOUS",
+}
+
+
+def normalize_vent_mode_label(raw: str) -> str:
+    """Normalize raw OCR output for the ventilator mode label."""
+
+    if not raw:
+        return ""
+
+    text = unicodedata.normalize("NFKC", raw)
+    text = text.replace("\u3000", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+
+    compact = text.replace(" ", "")
+    if compact in VENT_MODE_CANONICAL:
+        return VENT_MODE_CANONICAL[compact]
+    compact_upper = compact.upper()
+    if compact_upper in VENT_MODE_CANONICAL:
+        return VENT_MODE_CANONICAL[compact_upper]
+
+    for source, target in VENT_MODE_TRANSLATIONS:
+        if source.replace(" ", "") in compact:
+            text = text.replace(source, target)
+            compact = text.replace(" ", "")
+
+    ascii_text = re.sub(r"\s+", " ", text).strip().upper()
+    return VENT_MODE_CANONICAL.get(ascii_text, ascii_text)
+
+
+def is_pressure_support_mode(mode: str) -> bool:
+    """Return ``True`` if ``mode`` represents a pressure support style mode."""
+
+    if not mode:
+        return False
+
+    tokens = [t for t in re.split(r"[^A-Z0-9]+", mode.upper()) if t]
+    return any(token in PRESSURE_SUPPORT_MODE_TOKENS for token in tokens)
+
+
+def apply_pressure_support_split(results: dict) -> None:
+    """Populate ``PS`` or ``VTset`` based on the ventilator mode in ``results``."""
+
+    if "VTset" not in results and "PS" not in results:
+        return
+
+    vt_value = results.get("VTset", "") or ""
+    mode = results.get("VentMode", "") or ""
+
+    if is_pressure_support_mode(mode):
+        results["PS"] = vt_value
+        results["VTset"] = ""
+    else:
+        results["PS"] = ""
+        results["VTset"] = vt_value
+
+
+def parse_bp_text(raw: str):
+    """Normalize and parse the SBP/DBP/MAP triple from ``raw`` text."""
+
+    sanitized = ''.join(ch for ch in raw if ch in ALLOW_BP)
+    normalized = sanitized or raw
+    match = PAT_BP.search(normalized)
+    if match:
+        return normalized, match.group(1), match.group(2), match.group(3)
+
+    matches = list(PAT_BP_TOKEN.finditer(raw))
+    tokens = []
+    for idx, m in enumerate(matches):
+        token = m.group()
+        if '.' in token:
+            if token.endswith('.0'):
+                base = token[:-2]
+                after = raw[m.end():]
+                keep_zero = after.startswith('/')
+                if idx == 0 and len(base) <= 2:
+                    keep_zero = True
+                token = f"{base}0" if keep_zero else base
+            else:
+                token = token.replace('.', '')
+        tokens.append(token)
+
+    tokens = [tok for tok in tokens if tok]
+    if len(tokens) >= 3:
+        return normalized, tokens[0], tokens[1], tokens[2]
+
+    digits_only = ''.join(ch for ch in normalized if ch.isdigit())
+    if not digits_only:
+        digits_only = ''.join(ch for ch in raw if ch.isdigit())
+
+    if len(tokens) == 2 and tokens[0] and tokens[1]:
+        first, last = tokens
+        for sbp_len in (3, 2):
+            for dbp_len in (2, 3):
+                if sbp_len + dbp_len != len(first):
+                    continue
+                sbp = first[:sbp_len]
+                dbp = first[sbp_len:]
+                if sbp and dbp:
+                    return normalized, sbp, dbp, last
+
+    for lengths in PREFERRED_BP_SPLITS:
+        l1, l2, l3 = lengths
+        if l1 + l2 + l3 != len(digits_only):
+            continue
+        sbp = digits_only[:l1]
+        dbp = digits_only[l1:l1 + l2]
+        map_val = digits_only[l1 + l2:l1 + l2 + l3]
+        if sbp and dbp and map_val:
+            return normalized, sbp, dbp, map_val
+
+    return normalized, "", "", ""
 
 BP_BOUNDS = (
     (30, 300),  # SBP is typically three digits
@@ -538,20 +687,7 @@ def parse_bp_text(raw: str):
 
 
 def read_bp_roi(roi):
-    red = red_enhance(roi, 3)
-    diff = cv2.subtract(roi[:, :, 2], cv2.max(roi[:, :, 0], roi[:, :, 1]))
-    diff = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
-    diff = cv2.resize(diff, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    diff = cv2.addWeighted(diff, 1.4, cv2.GaussianBlur(diff, (0, 0), 1.0), -0.4, 0)
 
-    candidates = [
-        read_easy(red, ALLOW_BP_OCR),
-        read_easy(to_bin(red), ALLOW_BP),
-        read_easy(diff, ALLOW_BP_OCR),
-        read_easy(to_bin(diff), ALLOW_BP),
-    ]
-
-    raw = best_of(candidates)
     return parse_bp_text(raw)
 
 
@@ -646,7 +782,8 @@ def read_mode_roi(roi):
     b = to_bin(g)
     t1, c1 = read_easy(g, ALLOW_MODE_ASC)
     t2, c2 = read_easy(b, ALLOW_MODE_ASC)
-    return best_of([(t1, c1), (t2, c2)])
+    raw = best_of([(t1, c1), (t2, c2)])
+    return normalize_vent_mode_label(raw)
 
 
 def detect_spontaneous_breath(img, coords_list):
@@ -736,6 +873,8 @@ def ocr_vitals_from_image(image_path):
     cvp_crop = crop_image(img, CVP_COORDS)
     results['CVP'] = read_cvp_roi(cvp_crop)
 
+    apply_pressure_support_split(results)
+
     if detect_spontaneous_breath(img, SPONT_BREATH_COORDS):
         print("自発呼吸検出")
         results['SpontaneousBreath'] = 'detected'
@@ -747,7 +886,7 @@ def ocr_vitals_from_image(image_path):
 ALL_COLUMNS = [
     "SBP", "DBP", "MAP", "HR", "SpO2", "BSR1", "BSR2", "Tskin", "Trect", "etCO2",
     "RR", "Ppeak", "Pmean", "PEEPact", "RRact", "I_E", "FiO2", "VTe", "VTi",
-    "PEEPset", "VTset", "VentMode", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
+    "PEEPset", "VTset", "PS", "VentMode", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
     "Ca", "Glu", "Lac", "tBil", "HCO3", "BE", "Alb"
 ]
 
