@@ -25,11 +25,29 @@ def test_parse_bp_text_fallback_four_digits():
     assert map_val == "89"
 
 
+def test_parse_bp_text_handles_decimal_tokens_without_separators():
+    raw = "11.0 97.0 57.0"
+    text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
+    assert text == "110970570"
+    assert sbp == "110"
+    assert dbp == "97"
+    assert map_val == "57"
+
+
+def test_parse_bp_text_handles_missing_slash():
+    raw = "11097(57"
+    text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
+    assert text == raw
+    assert sbp == "110"
+    assert dbp == "97"
+    assert map_val == "57"
+
+
 @pytest.mark.skipif(vital_reader.cv2 is None, reason="OpenCV not available")
 def test_read_bp_roi_uses_sanitized_text(monkeypatch):
     np = pytest.importorskip("numpy")
     responses = iter([
-        ("11.0/97(57)", 0.9),
+        ("11097(57", 0.9),
         ("", 0.0),
     ])
 
@@ -41,7 +59,7 @@ def test_read_bp_roi_uses_sanitized_text(monkeypatch):
     roi = np.zeros((10, 10, 3), dtype=np.uint8)
     text, sbp, dbp, map_val = vital_reader.read_bp_roi(roi)
 
-    assert text == "110/97(57)"
+    assert text == "11097(57)"
     assert sbp == "110"
     assert dbp == "97"
     assert map_val == "57"
