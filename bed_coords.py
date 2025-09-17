@@ -1,6 +1,6 @@
 BED_COORDS_8 = {
     2: {
-        "BP_COMBINED_COORD": (457, 441, 155, 38),
+        "BP_COMBINED_COORD": (437, 441, 155, 38),
         "CVP_COORDS": (454, 477, 35, 33),
         "SPONT_BREATH_COORDS": [
             (74, 155, 379, 36),
@@ -28,7 +28,7 @@ BED_COORDS_8 = {
     },
 
     3: {
-        "BP_COMBINED_COORD": (457, 441+ 360, 155, 38),
+        "BP_COMBINED_COORD": (437, 441+ 360, 155, 38),
         "CVP_COORDS": (454, 837, 35, 33),
         "SPONT_BREATH_COORDS": [
             (714, 875, 379, 36),
@@ -56,7 +56,7 @@ BED_COORDS_8 = {
     },
     
     4: {
-         "BP_COMBINED_COORD": (457+640, 441, 155, 38),
+         "BP_COMBINED_COORD": (437+640, 441, 155, 38),
          "CVP_COORDS": (454+640, 477, 35, 33),
          "SPONT_BREATH_COORDS": [
             (714, 155, 379, 36),
@@ -84,7 +84,7 @@ BED_COORDS_8 = {
     },
 
     5: {
-         "BP_COMBINED_COORD": (457+1280, 441, 155, 38),
+         "BP_COMBINED_COORD": (437+1280, 441, 155, 38),
          "CVP_COORDS": (454+1280, 477, 35, 33),
          "SPONT_BREATH_COORDS": [
             (1354, 155, 379, 36),
