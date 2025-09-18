@@ -21,11 +21,6 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 try:  # pragma: no cover - optional dependency
-    import tensorflow as tf  # type: ignore
-except Exception:  # pragma: no cover
-    tf = None
-
-try:  # pragma: no cover - optional dependency
     import torch  # type: ignore
 except Exception:  # pragma: no cover
     torch = None
@@ -47,13 +42,6 @@ else:  # pragma: no cover - easyocr not available
 
 from bed_coords import BED_COORDS_8
 from bed_coords_4 import BED_COORDS_4
-
-# Optional ML model for CVP and other analyses
-cvp_model = None
-# Optional model and metadata for spontaneous-breathing detection (may be None)
-spont_breath_model = None
-spont_breath_meta = None
-spont_breath_transform = None
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -394,19 +382,6 @@ def read_mode_roi(roi):
 
 
 def read_cvp_roi(roi):
-    if (
-        cvp_model is not None
-        and cv2 is not None
-        and np is not None
-        and isinstance(roi, np.ndarray)
-        and roi.size > 0
-    ):
-        try:
-            pred = predict_cvp_from_image(roi)
-            if pred and pred != "na":
-                return pred
-        except Exception as exc:  # pragma: no cover - best effort logging
-            print(f"[WARN] CVP予測失敗: {exc}")
 
     text, _ = read_easy(roi, allow_dot=False)
     return sanitize_numeric_text(text)
@@ -458,9 +433,6 @@ def resolve_path(arg_val, env_name, config, key, candidates=None, must_exist=Tru
     raise ValueError(f"{key} is not specified or not found. Set via argument, env {env_name}, config, or place the file at one of default locations.")
 
 # 既定候補（あなたの環境向け）
-DEFAULT_CVP_MODEL_CANDIDATES = [
-    r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\CVP2\\cvp_model.keras",
-]
 DEFAULT_IMAGE_BASE_CANDIDATES = [
     r"Z:\\image",
 ]
@@ -481,19 +453,54 @@ DEFAULT_SPONT_BREATH_META_CANDIDATES = [
 # =========================
 
 def init_resources(
-    model_path: Path,
     spont_breath_model_path: Optional[Path] = None,
     spont_breath_meta_path: Optional[Path] = None,
 ):
-    """Load optional heavy resources such as ML models."""
+    """Load optional resources such as the spontaneous-breathing model."""
 
-    global cvp_model, spont_breath_model, spont_breath_meta, spont_breath_transform
+    global spont_breath_model, spont_breath_meta, spont_breath_transform
+
+    spont_breath_model = None
+    spont_breath_meta = None
+    spont_breath_transform = None
+
+    if spont_breath_model_path is None:
+        return
+
+    if torch is None:
+        print("[WARN] PyTorchが利用できないため自発呼吸モデルを読み込みません。")
+        return
+
+    if Image is None:
+        print("[WARN] Pillowが利用できないため自発呼吸モデルを読み込みません。")
+        return
+
     try:
-        print(f"Loading CVP model from: {model_path}")
-        cvp_model = tf.keras.models.load_model(str(model_path))
-    except Exception as e:
-        raise RuntimeError(f"CVPモデル読み込み失敗: {model_path} -> {e}")
+        meta: dict[str, object] = {}
+        if spont_breath_meta_path and Path(spont_breath_meta_path).is_file():
+            with open(spont_breath_meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
 
+        backbone = str(meta.get("backbone", "mobilenet_v3_small")) if meta else "mobilenet_v3_small"
+        img_h = int(meta.get("img_h", 128)) if meta else 128
+        img_w = int(meta.get("img_w", 512)) if meta else 512
+
+        model, transform = build_spont_breath_model(backbone, img_h, img_w)
+        state = torch.load(str(spont_breath_model_path), map_location="cpu")
+        model.load_state_dict(state, strict=False)
+        model.eval()
+
+        spont_breath_model = model
+        spont_breath_transform = transform
+        spont_breath_meta = meta
+        print(f"自発呼吸モデルを読み込みました: {spont_breath_model_path}")
+        if spont_breath_meta_path:
+            print(f"自発呼吸メタデータ: {spont_breath_meta_path}")
+    except Exception as exc:  # pragma: no cover - best effort logging
+        print(f"[WARN] 自発呼吸モデル読み込み失敗: {exc}")
+        spont_breath_model = None
+        spont_breath_transform = None
+        spont_breath_meta = None
 
 
 # =========================
@@ -502,7 +509,6 @@ def init_resources(
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cvp-model", help="Path to CVP model (.keras)")
     parser.add_argument(
         "--spont-breath-model",
         help="Path to spontaneous-breathing model (.keras)",
@@ -519,64 +525,6 @@ def parse_args():
         help="Comma-separated bed numbers to allow. Overrides host-based default.",
     )
     return parser.parse_args()
-
-# =========================
-# CVP 予測
-# =========================
-
-try:
-    with open(Path(__file__).with_name("class_indices.json"), "r", encoding="utf-8") as f:
-        class_indices = json.load(f)
-except FileNotFoundError:  # pragma: no cover - fallback for tests
-    class_indices = {str(i): i for i in range(16)}
-index_to_label = {v: k for k, v in class_indices.items()}
-
-def predict_cvp_from_image(img):
-    """Return the predicted CVP value from a cropped image.
-
-    The function resizes the image to the model's expected size and applies
-    light-weight preprocessing to improve digit recognition under various
-    lighting conditions.  When the model has only a single channel, the image
-    is converted to grayscale.  For three-channel models, the grayscale output
-    is duplicated across RGB channels so that the preprocessing remains
-    effective regardless of the original model configuration.
-    """
-
-    input_shape = getattr(cvp_model, "input_shape", None)
-    if not input_shape or len(input_shape) < 4:
-        raise RuntimeError("cvp_model must have 4D input shape")
-
-    target_h, target_w, channels = input_shape[1], input_shape[2], input_shape[3]
-    img_resized = cv2.resize(img, (target_w, target_h))
-
-    # ---- Preprocessing ----------------------------------------------------
-    # Convert to grayscale for consistent preprocessing
-    gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY) if img_resized.ndim == 3 else img_resized
-    # Reduce noise and enhance contrast
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
-    # Binarize to highlight digits
-    _, bin_img = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    if channels == 1:
-        img_processed = bin_img[..., np.newaxis]
-    else:
-        img_processed = cv2.cvtColor(bin_img, cv2.COLOR_GRAY2BGR)
-
-    # ----------------------------------------------------------------------
-    img_norm = img_processed / 255.0
-    img_input = np.expand_dims(img_norm, axis=0)
-    pred = cvp_model.predict(img_input)
-
-    pred_index = np.argmax(pred)
-    confidence = pred[0][pred_index]
-    print(f"予測インデックス: {pred_index}, 信頼度: {confidence:.2f}")
-    print(f"index_to_label[{pred_index}] = {index_to_label.get(pred_index, '未定義')}")
-    label = index_to_label.get(pred_index, "")
-    if confidence < 0.8:
-        return "na"
-    return label
 
 # =========================
 # CSV作成・保存など
@@ -841,14 +789,6 @@ if __name__ == "__main__":
     # Display available 8-screen bed coordinate keys
     print(BED_COORDS_8.keys())
 
-    cvp_model_path = resolve_path(
-        args.cvp_model,
-        "CVP_MODEL_PATH",
-        config,
-        "CVP_MODEL_PATH",
-        candidates=DEFAULT_CVP_MODEL_CANDIDATES,
-        must_exist=True,
-    )
     try:
         spont_breath_model_path = resolve_path(
             args.spont_breath_model,
@@ -888,13 +828,12 @@ if __name__ == "__main__":
         must_exist=False,
     )
 
-    print(f"[PATH] CVP_MODEL_PATH = {cvp_model_path}")
     print(f"[PATH] SPONT_BREATH_MODEL_PATH = {spont_breath_model_path}")
     print(f"[PATH] SPONT_BREATH_META_PATH = {spont_breath_meta_path}")
     print(f"[PATH] IMAGE_FOLDER(base) = {image_folder}")
     print(f"[PATH] VITALS_BASE_DIR = {vitals_base_dir}")
 
-    init_resources(cvp_model_path, spont_breath_model_path, spont_breath_meta_path)
+    init_resources(spont_breath_model_path, spont_breath_meta_path)
 
     beds_override = None
     if args.beds:
