@@ -36,6 +36,26 @@ def test_parse_bp_text_handles_missing_slash():
     assert dbp == "97"
     assert map_val == "57"
 
+
+def test_parse_bp_text_recovers_dbp_with_spurious_digit():
+    raw = "106166(84)"
+    text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
+
+    assert text == "106/66(84)"
+    assert sbp == "106"
+    assert dbp == "66"
+    assert map_val == "84"
+
+
+def test_parse_bp_text_recovers_dbp_without_map():
+    raw = "106166"
+    text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
+
+    assert text == "106/66"
+    assert sbp == "106"
+    assert dbp == "66"
+    assert map_val == ""
+
 @pytest.mark.skipif(vital_reader.cv2 is None, reason="OpenCV not available")
 def test_read_bp_roi_uses_sanitized_text(monkeypatch):
     np = pytest.importorskip("numpy")
