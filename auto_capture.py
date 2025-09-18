@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 import json
 from typing import List, Optional
-import socket
+
 
 # =========================
 # 設定ロード
@@ -40,17 +40,13 @@ def resolve_path(
     for c in candidates or []:
         if c:
             return Path(c).expanduser()
-    raise ValueError(f"{key} is not specified. Provide via argument, env {env_name}, or config.")
+    raise ValueError(
+        f"{key} is not specified. Provide via argument, env {env_name}, or config."
+    )
 
 
 DEFAULT_IMAGE_BASE_CANDIDATES = [r"Z:\\image"]
 
-# Host-specific default monitor and capture region
-# (region uses left/top/width/height; full HD as placeholder)
-HOST_DEFAULTS = {
-    "ws-PC1": {"monitor": 1, "region": {"left": 0, "top": 0, "width": 1920, "height": 1080}},
-    "Super-WS": {"monitor": 1, "region": {"left": 0, "top": 0, "width": 1920, "height": 1080}},
-}
 
 parser = argparse.ArgumentParser(description="Capture screenshots from a specific monitor.")
 parser.add_argument("--config", help="Path to config.json")
@@ -77,64 +73,50 @@ base_dir = resolve_path(
 )
 base_dir.mkdir(parents=True, exist_ok=True)
 
-host_defaults = HOST_DEFAULTS.get(socket.gethostname(), {})
-
-monitor_number = args.monitor
-left, top, width, height = args.left, args.top, args.width, args.height
-
-if monitor_number is None:
-    env_mon = os.getenv("CAPTURE_MONITOR")
-    if env_mon is not None:
-        monitor_number = int(env_mon)
-    elif "monitor" in host_defaults:
-        monitor_number = host_defaults["monitor"]
-
-if None in (left, top, width, height):
-    env_vals = [
-        os.getenv("CAPTURE_LEFT"),
-        os.getenv("CAPTURE_TOP"),
-        os.getenv("CAPTURE_WIDTH"),
-        os.getenv("CAPTURE_HEIGHT"),
-    ]
-    if all(env_vals):
-        left, top, width, height = map(int, env_vals)
-    elif "region" in host_defaults:
-        region = host_defaults["region"]
-        left = region["left"]
-        top = region["top"]
-        width = region["width"]
-        height = region["height"]
-
 try:
     with mss() as sct:
-        if None not in (left, top, width, height):
+        if None not in (args.left, args.top, args.width, args.height):
             monitor = {
-                "left": left,
-                "top": top,
-                "width": width,
-                "height": height,
+                "left": args.left,
+                "top": args.top,
+                "width": args.width,
+                "height": args.height,
             }
             print(
                 f"📸 座標指定でスクリーンショット開始（{args.interval}秒おき）: {monitor}"
             )
         else:
-            if monitor_number is None:
+            available_monitors = sct.monitors[1:]
+            if not available_monitors:
+                raise RuntimeError("利用可能なモニターが見つかりません。")
+
+            if args.monitor is None:
                 print("利用可能なモニター:")
-                for i, mon in enumerate(sct.monitors[1:], start=1):
+                for i, mon in enumerate(available_monitors, start=1):
                     print(
                         f"  {i}: {mon['width']}x{mon['height']} ({mon['left']},{mon['top']})"
                     )
+                max_monitor = len(available_monitors)
                 while True:
                     try:
-                        monitor_number = int(
-                            input("キャプチャするモニター番号を入力してください: ")
+                        prompt = (
+                            f"キャプチャするモニター番号を入力してください (1-{max_monitor}): "
                         )
-                        if 1 <= monitor_number < len(sct.monitors):
+                        monitor_number = int(input(prompt))
+                        if 1 <= monitor_number <= max_monitor:
                             break
                         print("⚠️ 無効なモニター番号です。")
                     except ValueError:
                         print("⚠️ 数値を入力してください。")
-            monitor = sct.monitors[monitor_number]
+            else:
+                monitor_number = args.monitor
+                max_monitor = len(available_monitors)
+                if not 1 <= monitor_number <= max_monitor:
+                    raise ValueError(
+                        f"モニター番号は1から{max_monitor}の範囲で指定してください。"
+                    )
+
+            monitor = available_monitors[monitor_number - 1]
             print(
                 f"📸 モニター{monitor_number}のスクリーンショット開始（{args.interval}秒おき）"
             )
