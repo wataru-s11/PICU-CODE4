@@ -126,6 +126,292 @@ def guard_ok(crop_bgr, p=DEFAULT_GUARD_PARAMS):
     )
 
 # =========================
+# OCR / 画像ユーティリティ
+# =========================
+
+# These globals are populated at runtime once the user selects the screen
+# layout.  Providing safe defaults keeps the module importable for unit tests
+# and makes helper functions usable without running the interactive workflow.
+BP_COMBINED_COORD = (0, 0, 0, 0)
+CVP_COORDS = (0, 0, 0, 0)
+vital_crop: dict[str, tuple[int, int, int, int]] = {}
+SPONT_BREATH_COORDS: list[tuple[int, int, int, int]] = []
+
+
+def crop_image(img, coord):
+    """Safely crop ``img`` according to ``coord``.
+
+    ``coord`` is expected to be a four element tuple ``(x, y, w, h)``.  The
+    function clamps the region so that it always lies inside ``img`` and
+    supports both :class:`numpy.ndarray` inputs (the typical OpenCV image) and
+    nested Python sequences which are convenient for lightweight tests.
+    """
+
+    if img is None:
+        raise ValueError("img must not be None")
+
+    if not coord:
+        return img
+
+    x, y, w, h = coord
+    x0 = max(0, int(x))
+    y0 = max(0, int(y))
+    w = max(0, int(w))
+    h = max(0, int(h))
+    x1 = x0 + w
+    y1 = y0 + h
+
+    if np is not None and isinstance(img, np.ndarray):
+        height, width = img.shape[:2]
+        x1 = min(width, x1)
+        y1 = min(height, y1)
+        x0 = min(x0, width)
+        y0 = min(y0, height)
+        return img[y0:y1, x0:x1].copy()
+
+    # Fallback for simple list-of-lists images used in tests
+    rows = img[y0:y1]
+    return [row[x0:x1] for row in rows]
+
+
+def sanitize_ocr_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", str(text))
+    normalized = normalized.replace("\u3000", " ")
+    normalized = normalized.strip()
+    return re.sub(r"\s+", "", normalized)
+
+
+def read_easy(img, allow_dot: bool = False):
+    """Run EasyOCR on ``img`` and return the concatenated text.
+
+    The function gracefully handles environments where EasyOCR (and its heavy
+    dependencies) are not available by returning an empty result.
+    """
+
+    if easyocr_reader is None or img is None:
+        return "", 0.0
+
+    np_img = None
+    if np is not None and isinstance(img, np.ndarray):
+        np_img = img
+    elif np is not None:
+        try:
+            np_img = np.array(img)
+        except Exception:
+            np_img = None
+
+    if np_img is None or np_img.size == 0:
+        return "", 0.0
+
+    results = easyocr_reader.readtext(np_img, detail=1, paragraph=False)
+    texts = []
+    confidences = []
+    for _, text, conf in results:
+        cleaned = sanitize_ocr_text(text)
+        if not cleaned:
+            continue
+        texts.append(cleaned)
+        confidences.append(float(conf))
+
+    joined = "".join(texts)
+    if not allow_dot:
+        joined = joined.replace(".", "")
+    joined = joined.strip()
+    confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return joined, confidence
+
+
+def _bp_penalty(value: int, low: int, high: int) -> int:
+    if low <= value <= high:
+        return 0
+    if value < low:
+        return low - value
+    return value - high
+
+
+def _split_bp_digits(digits: str) -> tuple[str, str]:
+    if not digits:
+        return "", ""
+    best = (digits, "")
+    best_score = float("inf")
+    for idx in range(1, len(digits)):
+        left = digits[:idx]
+        right = digits[idx:]
+        try:
+            sbp = int(left)
+            dbp = int(right)
+        except ValueError:
+            continue
+        score = _bp_penalty(sbp, 60, 260) + _bp_penalty(dbp, 20, 200)
+        if score < best_score:
+            best_score = score
+            best = (str(sbp), str(dbp))
+    return best
+
+
+def parse_bp_text(raw_text: str) -> tuple[str, str, str, str]:
+    """Parse blood pressure text into components.
+
+    The monitor sometimes emits strings such as ``"11.0/97(57)"`` or even
+    ``"11097(57"``.  The function normalises these variations, attempting to
+    recover the systolic, diastolic and mean arterial pressure as strings.
+    """
+
+    normalized = sanitize_ocr_text(raw_text)
+    if not normalized:
+        return "", "", "", ""
+
+    normalized = normalized.replace(",", ".")
+    normalized = normalized.replace(".", "")
+
+    map_val = ""
+    map_match = re.search(r"\((\d{1,3})\)", normalized)
+    if not map_match:
+        map_match = re.search(r"\((\d{1,3})", normalized)
+    if map_match:
+        map_val = map_match.group(1)
+        normalized = normalized[: map_match.start()]
+
+    main = normalized
+    sbp = ""
+    dbp = ""
+    if "/" in main:
+        left, right = main.split("/", 1)
+        sbp = re.sub(r"\D", "", left)
+        dbp = re.sub(r"\D", "", right)
+    else:
+        digits = re.sub(r"\D", "", main)
+        sbp, dbp = _split_bp_digits(digits)
+
+    sbp = sbp.lstrip("0") or sbp
+    dbp = dbp.lstrip("0") or dbp
+
+    sanitized = ""
+    if sbp and dbp:
+        sanitized = f"{sbp}/{dbp}"
+    elif sbp:
+        sanitized = sbp
+    elif dbp:
+        sanitized = dbp
+    if map_val:
+        sanitized = f"{sanitized}({map_val})" if sanitized else f"({map_val})"
+
+    return sanitized, sbp, dbp, map_val
+
+
+def read_bp_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    return parse_bp_text(text)
+
+
+def sanitize_numeric_text(text: str, allow_dot: bool = False, allow_sign: bool = False) -> str:
+    normalized = sanitize_ocr_text(text)
+    if not normalized:
+        return ""
+    allowed = "0123456789"
+    if allow_dot:
+        allowed += "."
+    if allow_sign:
+        allowed += "+-"
+    cleaned = "".join(ch for ch in normalized if ch in allowed)
+    if allow_dot:
+        cleaned = cleaned.strip(".")
+    return cleaned
+
+
+def read_num_roi(roi, allow_dot: bool = False, allow_sign: bool = False):
+    text, _ = read_easy(roi, allow_dot=allow_dot)
+    return sanitize_numeric_text(text, allow_dot=allow_dot, allow_sign=allow_sign)
+
+
+def read_temp_roi(roi):
+    return read_num_roi(roi, allow_dot=True, allow_sign=True)
+
+
+def read_ie_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    normalized = sanitize_ocr_text(text)
+    normalized = normalized.replace("\uFF1A", ":")
+    normalized = normalized.replace("/", ":")
+    normalized = re.sub(r"[^0-9:]", "", normalized)
+    return normalized
+
+
+def normalize_vent_mode_label(label: str) -> str:
+    if not label:
+        return ""
+    text = unicodedata.normalize("NFKC", str(label))
+    replacements = [
+        ("オートモード", " AUTO MODE "),
+        ("オート", " AUTO "),
+        ("モード", " MODE "),
+    ]
+    for src, dst in replacements:
+        text = text.replace(src, dst)
+    text = text.replace("\u3000", " ")
+    text = re.sub(r"[\s_]+", " ", text)
+    text = text.strip()
+    text = text.upper()
+    return re.sub(r"\s+", " ", text)
+
+
+def is_pressure_support_mode(label: str) -> bool:
+    normalized = normalize_vent_mode_label(label)
+    if not normalized:
+        return False
+    tokens = re.split(r"[\s/+\-]+", normalized)
+    token_set = {t for t in tokens if t}
+    if "PRESSURE" in token_set and "SUPPORT" in token_set:
+        return True
+    ps_tokens = {"PS", "PSV", "P.S", "PRESSURESUPPORT", "SPONT", "SPONTANEOUS"}
+    if any(token in ps_tokens for token in token_set):
+        return True
+    if "PRESSURE SUPPORT" in normalized:
+        return True
+    return False
+
+
+def apply_pressure_support_split(results):
+    if results is None:
+        return
+
+    mode = results.get("VentMode", "")
+    vtset_val = results.get("VTset", "")
+    vtset_str = "" if vtset_val is None else str(vtset_val)
+
+    if is_pressure_support_mode(mode):
+        results["PS"] = vtset_str
+        results["VTset"] = ""
+    else:
+        results.setdefault("PS", "")
+
+
+def read_mode_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    return normalize_vent_mode_label(text)
+
+
+def read_cvp_roi(roi):
+    if (
+        cvp_model is not None
+        and cv2 is not None
+        and np is not None
+        and isinstance(roi, np.ndarray)
+        and roi.size > 0
+    ):
+        try:
+            pred = predict_cvp_from_image(roi)
+            if pred and pred != "na":
+                return pred
+        except Exception as exc:  # pragma: no cover - best effort logging
+            print(f"[WARN] CVP予測失敗: {exc}")
+
+    text, _ = read_easy(roi, allow_dot=False)
+    return sanitize_numeric_text(text)
+
+# =========================
 # 設定ロード
 # =========================
 
