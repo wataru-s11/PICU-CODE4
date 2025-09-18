@@ -43,11 +43,6 @@ else:  # pragma: no cover - easyocr not available
 from bed_coords import BED_COORDS_8
 from bed_coords_4 import BED_COORDS_4
 
-# Optional model and metadata for spontaneous-breathing detection (may be None)
-spont_breath_model = None
-spont_breath_meta = None
-spont_breath_transform = None
-
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 DEFAULT_GUARD_PARAMS = dict(
@@ -387,6 +382,7 @@ def read_mode_roi(roi):
 
 
 def read_cvp_roi(roi):
+
     text, _ = read_easy(roi, allow_dot=False)
     return sanitize_numeric_text(text)
 
