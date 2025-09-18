@@ -15,10 +15,14 @@ def test_parse_bp_text_strips_punctuation():
     assert dbp == "97"
     assert map_val == "57"
 
+    raw = "119/71(89)"
+    _, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
     assert sbp == "119"
     assert dbp == "71"
     assert map_val == "89"
 
+    raw = "110/97(57)"
+    _, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
     assert sbp == "110"
     assert dbp == "97"
     assert map_val == "57"

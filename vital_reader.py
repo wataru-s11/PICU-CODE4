@@ -21,11 +21,6 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 try:  # pragma: no cover - optional dependency
-    import tensorflow as tf  # type: ignore
-except Exception:  # pragma: no cover
-    tf = None
-
-try:  # pragma: no cover - optional dependency
     import torch  # type: ignore
 except Exception:  # pragma: no cover
     torch = None
@@ -48,8 +43,6 @@ else:  # pragma: no cover - easyocr not available
 from bed_coords import BED_COORDS_8
 from bed_coords_4 import BED_COORDS_4
 
-# Optional ML model for CVP and other analyses
-cvp_model = None
 # Optional model and metadata for spontaneous-breathing detection (may be None)
 spont_breath_model = None
 spont_breath_meta = None
@@ -126,6 +119,278 @@ def guard_ok(crop_bgr, p=DEFAULT_GUARD_PARAMS):
     )
 
 # =========================
+# OCR / 画像ユーティリティ
+# =========================
+
+# These globals are populated at runtime once the user selects the screen
+# layout.  Providing safe defaults keeps the module importable for unit tests
+# and makes helper functions usable without running the interactive workflow.
+BP_COMBINED_COORD = (0, 0, 0, 0)
+CVP_COORDS = (0, 0, 0, 0)
+vital_crop: dict[str, tuple[int, int, int, int]] = {}
+SPONT_BREATH_COORDS: list[tuple[int, int, int, int]] = []
+
+
+def crop_image(img, coord):
+    """Safely crop ``img`` according to ``coord``.
+
+    ``coord`` is expected to be a four element tuple ``(x, y, w, h)``.  The
+    function clamps the region so that it always lies inside ``img`` and
+    supports both :class:`numpy.ndarray` inputs (the typical OpenCV image) and
+    nested Python sequences which are convenient for lightweight tests.
+    """
+
+    if img is None:
+        raise ValueError("img must not be None")
+
+    if not coord:
+        return img
+
+    x, y, w, h = coord
+    x0 = max(0, int(x))
+    y0 = max(0, int(y))
+    w = max(0, int(w))
+    h = max(0, int(h))
+    x1 = x0 + w
+    y1 = y0 + h
+
+    if np is not None and isinstance(img, np.ndarray):
+        height, width = img.shape[:2]
+        x1 = min(width, x1)
+        y1 = min(height, y1)
+        x0 = min(x0, width)
+        y0 = min(y0, height)
+        return img[y0:y1, x0:x1].copy()
+
+    # Fallback for simple list-of-lists images used in tests
+    rows = img[y0:y1]
+    return [row[x0:x1] for row in rows]
+
+
+def sanitize_ocr_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", str(text))
+    normalized = normalized.replace("\u3000", " ")
+    normalized = normalized.strip()
+    return re.sub(r"\s+", "", normalized)
+
+
+def read_easy(img, allow_dot: bool = False):
+    """Run EasyOCR on ``img`` and return the concatenated text.
+
+    The function gracefully handles environments where EasyOCR (and its heavy
+    dependencies) are not available by returning an empty result.
+    """
+
+    if easyocr_reader is None or img is None:
+        return "", 0.0
+
+    np_img = None
+    if np is not None and isinstance(img, np.ndarray):
+        np_img = img
+    elif np is not None:
+        try:
+            np_img = np.array(img)
+        except Exception:
+            np_img = None
+
+    if np_img is None or np_img.size == 0:
+        return "", 0.0
+
+    results = easyocr_reader.readtext(np_img, detail=1, paragraph=False)
+    texts = []
+    confidences = []
+    for _, text, conf in results:
+        cleaned = sanitize_ocr_text(text)
+        if not cleaned:
+            continue
+        texts.append(cleaned)
+        confidences.append(float(conf))
+
+    joined = "".join(texts)
+    if not allow_dot:
+        joined = joined.replace(".", "")
+    joined = joined.strip()
+    confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return joined, confidence
+
+
+def _bp_penalty(value: int, low: int, high: int) -> int:
+    if low <= value <= high:
+        return 0
+    if value < low:
+        return low - value
+    return value - high
+
+
+def _split_bp_digits(digits: str) -> tuple[str, str]:
+    if not digits:
+        return "", ""
+    best = (digits, "")
+    best_score = float("inf")
+    for idx in range(1, len(digits)):
+        left = digits[:idx]
+        right = digits[idx:]
+        try:
+            sbp = int(left)
+            dbp = int(right)
+        except ValueError:
+            continue
+        score = _bp_penalty(sbp, 60, 260) + _bp_penalty(dbp, 20, 200)
+        if score < best_score:
+            best_score = score
+            best = (str(sbp), str(dbp))
+    return best
+
+
+def parse_bp_text(raw_text: str) -> tuple[str, str, str, str]:
+    """Parse blood pressure text into components.
+
+    The monitor sometimes emits strings such as ``"11.0/97(57)"`` or even
+    ``"11097(57"``.  The function normalises these variations, attempting to
+    recover the systolic, diastolic and mean arterial pressure as strings.
+    """
+
+    normalized = sanitize_ocr_text(raw_text)
+    if not normalized:
+        return "", "", "", ""
+
+    normalized = normalized.replace(",", ".")
+    normalized = normalized.replace(".", "")
+
+    map_val = ""
+    map_match = re.search(r"\((\d{1,3})\)", normalized)
+    if not map_match:
+        map_match = re.search(r"\((\d{1,3})", normalized)
+    if map_match:
+        map_val = map_match.group(1)
+        normalized = normalized[: map_match.start()]
+
+    main = normalized
+    sbp = ""
+    dbp = ""
+    if "/" in main:
+        left, right = main.split("/", 1)
+        sbp = re.sub(r"\D", "", left)
+        dbp = re.sub(r"\D", "", right)
+    else:
+        digits = re.sub(r"\D", "", main)
+        sbp, dbp = _split_bp_digits(digits)
+
+    sbp = sbp.lstrip("0") or sbp
+    dbp = dbp.lstrip("0") or dbp
+
+    sanitized = ""
+    if sbp and dbp:
+        sanitized = f"{sbp}/{dbp}"
+    elif sbp:
+        sanitized = sbp
+    elif dbp:
+        sanitized = dbp
+    if map_val:
+        sanitized = f"{sanitized}({map_val})" if sanitized else f"({map_val})"
+
+    return sanitized, sbp, dbp, map_val
+
+
+def read_bp_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    return parse_bp_text(text)
+
+
+def sanitize_numeric_text(text: str, allow_dot: bool = False, allow_sign: bool = False) -> str:
+    normalized = sanitize_ocr_text(text)
+    if not normalized:
+        return ""
+    allowed = "0123456789"
+    if allow_dot:
+        allowed += "."
+    if allow_sign:
+        allowed += "+-"
+    cleaned = "".join(ch for ch in normalized if ch in allowed)
+    if allow_dot:
+        cleaned = cleaned.strip(".")
+    return cleaned
+
+
+def read_num_roi(roi, allow_dot: bool = False, allow_sign: bool = False):
+    text, _ = read_easy(roi, allow_dot=allow_dot)
+    return sanitize_numeric_text(text, allow_dot=allow_dot, allow_sign=allow_sign)
+
+
+def read_temp_roi(roi):
+    return read_num_roi(roi, allow_dot=True, allow_sign=True)
+
+
+def read_ie_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    normalized = sanitize_ocr_text(text)
+    normalized = normalized.replace("\uFF1A", ":")
+    normalized = normalized.replace("/", ":")
+    normalized = re.sub(r"[^0-9:]", "", normalized)
+    return normalized
+
+
+def normalize_vent_mode_label(label: str) -> str:
+    if not label:
+        return ""
+    text = unicodedata.normalize("NFKC", str(label))
+    replacements = [
+        ("オートモード", " AUTO MODE "),
+        ("オート", " AUTO "),
+        ("モード", " MODE "),
+    ]
+    for src, dst in replacements:
+        text = text.replace(src, dst)
+    text = text.replace("\u3000", " ")
+    text = re.sub(r"[\s_]+", " ", text)
+    text = text.strip()
+    text = text.upper()
+    return re.sub(r"\s+", " ", text)
+
+
+def is_pressure_support_mode(label: str) -> bool:
+    normalized = normalize_vent_mode_label(label)
+    if not normalized:
+        return False
+    tokens = re.split(r"[\s/+\-]+", normalized)
+    token_set = {t for t in tokens if t}
+    if "PRESSURE" in token_set and "SUPPORT" in token_set:
+        return True
+    ps_tokens = {"PS", "PSV", "P.S", "PRESSURESUPPORT", "SPONT", "SPONTANEOUS"}
+    if any(token in ps_tokens for token in token_set):
+        return True
+    if "PRESSURE SUPPORT" in normalized:
+        return True
+    return False
+
+
+def apply_pressure_support_split(results):
+    if results is None:
+        return
+
+    mode = results.get("VentMode", "")
+    vtset_val = results.get("VTset", "")
+    vtset_str = "" if vtset_val is None else str(vtset_val)
+
+    if is_pressure_support_mode(mode):
+        results["PS"] = vtset_str
+        results["VTset"] = ""
+    else:
+        results.setdefault("PS", "")
+
+
+def read_mode_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    return normalize_vent_mode_label(text)
+
+
+def read_cvp_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    return sanitize_numeric_text(text)
+
+# =========================
 # 設定ロード
 # =========================
 
@@ -172,9 +437,6 @@ def resolve_path(arg_val, env_name, config, key, candidates=None, must_exist=Tru
     raise ValueError(f"{key} is not specified or not found. Set via argument, env {env_name}, config, or place the file at one of default locations.")
 
 # 既定候補（あなたの環境向け）
-DEFAULT_CVP_MODEL_CANDIDATES = [
-    r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\CVP2\\cvp_model.keras",
-]
 DEFAULT_IMAGE_BASE_CANDIDATES = [
     r"Z:\\image",
 ]
@@ -195,19 +457,54 @@ DEFAULT_SPONT_BREATH_META_CANDIDATES = [
 # =========================
 
 def init_resources(
-    model_path: Path,
     spont_breath_model_path: Optional[Path] = None,
     spont_breath_meta_path: Optional[Path] = None,
 ):
-    """Load optional heavy resources such as ML models."""
+    """Load optional resources such as the spontaneous-breathing model."""
 
-    global cvp_model, spont_breath_model, spont_breath_meta, spont_breath_transform
+    global spont_breath_model, spont_breath_meta, spont_breath_transform
+
+    spont_breath_model = None
+    spont_breath_meta = None
+    spont_breath_transform = None
+
+    if spont_breath_model_path is None:
+        return
+
+    if torch is None:
+        print("[WARN] PyTorchが利用できないため自発呼吸モデルを読み込みません。")
+        return
+
+    if Image is None:
+        print("[WARN] Pillowが利用できないため自発呼吸モデルを読み込みません。")
+        return
+
     try:
-        print(f"Loading CVP model from: {model_path}")
-        cvp_model = tf.keras.models.load_model(str(model_path))
-    except Exception as e:
-        raise RuntimeError(f"CVPモデル読み込み失敗: {model_path} -> {e}")
+        meta: dict[str, object] = {}
+        if spont_breath_meta_path and Path(spont_breath_meta_path).is_file():
+            with open(spont_breath_meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
 
+        backbone = str(meta.get("backbone", "mobilenet_v3_small")) if meta else "mobilenet_v3_small"
+        img_h = int(meta.get("img_h", 128)) if meta else 128
+        img_w = int(meta.get("img_w", 512)) if meta else 512
+
+        model, transform = build_spont_breath_model(backbone, img_h, img_w)
+        state = torch.load(str(spont_breath_model_path), map_location="cpu")
+        model.load_state_dict(state, strict=False)
+        model.eval()
+
+        spont_breath_model = model
+        spont_breath_transform = transform
+        spont_breath_meta = meta
+        print(f"自発呼吸モデルを読み込みました: {spont_breath_model_path}")
+        if spont_breath_meta_path:
+            print(f"自発呼吸メタデータ: {spont_breath_meta_path}")
+    except Exception as exc:  # pragma: no cover - best effort logging
+        print(f"[WARN] 自発呼吸モデル読み込み失敗: {exc}")
+        spont_breath_model = None
+        spont_breath_transform = None
+        spont_breath_meta = None
 
 
 # =========================
@@ -216,7 +513,6 @@ def init_resources(
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cvp-model", help="Path to CVP model (.keras)")
     parser.add_argument(
         "--spont-breath-model",
         help="Path to spontaneous-breathing model (.keras)",
@@ -233,64 +529,6 @@ def parse_args():
         help="Comma-separated bed numbers to allow. Overrides host-based default.",
     )
     return parser.parse_args()
-
-# =========================
-# CVP 予測
-# =========================
-
-try:
-    with open(Path(__file__).with_name("class_indices.json"), "r", encoding="utf-8") as f:
-        class_indices = json.load(f)
-except FileNotFoundError:  # pragma: no cover - fallback for tests
-    class_indices = {str(i): i for i in range(16)}
-index_to_label = {v: k for k, v in class_indices.items()}
-
-def predict_cvp_from_image(img):
-    """Return the predicted CVP value from a cropped image.
-
-    The function resizes the image to the model's expected size and applies
-    light-weight preprocessing to improve digit recognition under various
-    lighting conditions.  When the model has only a single channel, the image
-    is converted to grayscale.  For three-channel models, the grayscale output
-    is duplicated across RGB channels so that the preprocessing remains
-    effective regardless of the original model configuration.
-    """
-
-    input_shape = getattr(cvp_model, "input_shape", None)
-    if not input_shape or len(input_shape) < 4:
-        raise RuntimeError("cvp_model must have 4D input shape")
-
-    target_h, target_w, channels = input_shape[1], input_shape[2], input_shape[3]
-    img_resized = cv2.resize(img, (target_w, target_h))
-
-    # ---- Preprocessing ----------------------------------------------------
-    # Convert to grayscale for consistent preprocessing
-    gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY) if img_resized.ndim == 3 else img_resized
-    # Reduce noise and enhance contrast
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
-    # Binarize to highlight digits
-    _, bin_img = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    if channels == 1:
-        img_processed = bin_img[..., np.newaxis]
-    else:
-        img_processed = cv2.cvtColor(bin_img, cv2.COLOR_GRAY2BGR)
-
-    # ----------------------------------------------------------------------
-    img_norm = img_processed / 255.0
-    img_input = np.expand_dims(img_norm, axis=0)
-    pred = cvp_model.predict(img_input)
-
-    pred_index = np.argmax(pred)
-    confidence = pred[0][pred_index]
-    print(f"予測インデックス: {pred_index}, 信頼度: {confidence:.2f}")
-    print(f"index_to_label[{pred_index}] = {index_to_label.get(pred_index, '未定義')}")
-    label = index_to_label.get(pred_index, "")
-    if confidence < 0.8:
-        return "na"
-    return label
 
 # =========================
 # CSV作成・保存など
@@ -555,14 +793,6 @@ if __name__ == "__main__":
     # Display available 8-screen bed coordinate keys
     print(BED_COORDS_8.keys())
 
-    cvp_model_path = resolve_path(
-        args.cvp_model,
-        "CVP_MODEL_PATH",
-        config,
-        "CVP_MODEL_PATH",
-        candidates=DEFAULT_CVP_MODEL_CANDIDATES,
-        must_exist=True,
-    )
     try:
         spont_breath_model_path = resolve_path(
             args.spont_breath_model,
@@ -602,13 +832,12 @@ if __name__ == "__main__":
         must_exist=False,
     )
 
-    print(f"[PATH] CVP_MODEL_PATH = {cvp_model_path}")
     print(f"[PATH] SPONT_BREATH_MODEL_PATH = {spont_breath_model_path}")
     print(f"[PATH] SPONT_BREATH_META_PATH = {spont_breath_meta_path}")
     print(f"[PATH] IMAGE_FOLDER(base) = {image_folder}")
     print(f"[PATH] VITALS_BASE_DIR = {vitals_base_dir}")
 
-    init_resources(cvp_model_path, spont_breath_model_path, spont_breath_meta_path)
+    init_resources(spont_breath_model_path, spont_breath_meta_path)
 
     beds_override = None
     if args.beds:
