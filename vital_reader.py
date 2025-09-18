@@ -239,6 +239,58 @@ def _split_bp_digits(digits: str) -> tuple[str, str]:
     return best
 
 
+def _refine_bp_values(sbp: str, dbp: str, map_val: str) -> tuple[str, str]:
+    """Correct implausible blood pressure splits when possible."""
+
+    if not sbp or not dbp:
+        return sbp, dbp
+
+    try:
+        sbp_int = int(sbp)
+        dbp_int = int(dbp)
+    except ValueError:
+        return sbp, dbp
+
+    if sbp_int >= dbp_int:
+        return sbp, dbp
+
+    map_int: Optional[int] = None
+    if map_val:
+        try:
+            map_int = int(map_val)
+        except ValueError:
+            map_int = None
+
+    def score(value: int) -> float:
+        if map_int is not None:
+            approx_map = round((sbp_int + 2 * value) / 3)
+            return abs(approx_map - map_int)
+        return abs(sbp_int - value)
+
+    best_val: Optional[int] = None
+    best_score = score(dbp_int)
+
+    for start in range(1, len(dbp)):
+        candidate_text = dbp[start:].lstrip("0")
+        if not candidate_text:
+            continue
+        try:
+            candidate_val = int(candidate_text)
+        except ValueError:
+            continue
+        if candidate_val < 20 or candidate_val > sbp_int:
+            continue
+        candidate_score = score(candidate_val)
+        if candidate_score < best_score:
+            best_score = candidate_score
+            best_val = candidate_val
+
+    if best_val is not None:
+        return str(sbp_int), str(best_val)
+
+    return sbp, dbp
+
+
 def parse_bp_text(raw_text: str) -> tuple[str, str, str, str]:
     """Parse blood pressure text into components.
 
@@ -275,6 +327,8 @@ def parse_bp_text(raw_text: str) -> tuple[str, str, str, str]:
 
     sbp = sbp.lstrip("0") or sbp
     dbp = dbp.lstrip("0") or dbp
+
+    sbp, dbp = _refine_bp_values(sbp, dbp, map_val)
 
     sanitized = ""
     if sbp and dbp:
