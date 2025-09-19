@@ -1,4 +1,5 @@
 import sys
+import time
 import types
 
 # Minimal pandas stub
@@ -6,6 +7,7 @@ pd_stub = types.SimpleNamespace(isna=lambda x: x != x)
 sys.modules.setdefault("pandas", pd_stub)
 
 from vitals.bpup_logic import evaluate_bpup
+import main_surgery as ms
 
 class DummyDF:
     def __init__(self, rows):
@@ -73,3 +75,39 @@ def test_bpup_a_suppressed_within_one_hour():
     df = DummyDF([row])
     vitals = {'noradrenaline': 0.05}
     assert evaluate_bpup(vitals, df, {}, 'a', elapsed_minutes=30) == []
+
+
+def test_bpup_pause_retained_while_drop_timer_active():
+    df = DummyDF([row])
+    vitals = {
+        'noradrenaline': 0,
+        'pitressin': 0.04,
+        ms.BPUP_PITRESSIN_PAUSE_KEY: time.time() + 120,
+    }
+    inst = evaluate_bpup(
+        vitals,
+        df,
+        {},
+        'a',
+        {'pitressin': 0.04},
+        elapsed_minutes=61,
+    )[0]
+    assert inst['pause_min'] == 1
+
+
+def test_bpup_pause_expires_after_timer():
+    df = DummyDF([row])
+    vitals = {
+        'noradrenaline': 0,
+        'pitressin': 0.04,
+        ms.BPUP_PITRESSIN_PAUSE_KEY: time.time() - 120,
+    }
+    inst = evaluate_bpup(
+        vitals,
+        df,
+        {},
+        'a',
+        {'pitressin': 0.04},
+        elapsed_minutes=61,
+    )[0]
+    assert inst['pause_min'] == 0

@@ -1,3 +1,5 @@
+import time
+
 from common.rule_engine import evaluate_rules
 
 # BPUP（SBP上昇時）に関連する複数薬剤介入（CONT, HANP, VASO）含む
@@ -46,6 +48,10 @@ def evaluate_bpup(
         pit = vitals.get("pitressin") or 0
         hanp = vitals.get("hanp") or 0
         cont = vitals.get("contomin") or 0
+        pause_until = vitals.get("BPUP_PITRESSIN_DROP_PAUSE_UNTIL")
+        pause_active = False
+        if isinstance(pause_until, (int, float)):
+            pause_active = time.time() < pause_until
 
         msg = inst.get("instruction", "")
         if na > 0:
@@ -53,7 +59,7 @@ def evaluate_bpup(
         elif pit >= 0.03:
             msg = "ピトレシンを減量してもよいです"
             prev_pit = prev.get("pitressin")
-            if prev_pit is None or pit >= prev_pit:
+            if not pause_active and (prev_pit is None or pit >= prev_pit):
                 inst["pause_min"] = 0
         elif 0 <= pit <= 0.02:
             if 0 <= hanp < 0.2:
