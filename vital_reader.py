@@ -7,6 +7,7 @@ import argparse
 import json
 import socket
 from typing import Optional
+from decimal import Decimal, InvalidOperation
 try:  # pragma: no cover - optional dependency
     import numpy as np  # type: ignore
 except Exception:  # pragma: no cover
@@ -169,6 +170,60 @@ def sanitize_ocr_text(text: str) -> str:
     normalized = normalized.replace("\u3000", " ")
     normalized = normalized.strip()
     return re.sub(r"\s+", "", normalized)
+
+
+def normalize_ie_text(text: str) -> str:
+    normalized = sanitize_ocr_text(text)
+    if not normalized:
+        return ""
+
+    normalized = normalized.replace("\uFF1A", ":")
+    normalized = normalized.replace("/", ":")
+    normalized = normalized.replace("．", ".")
+    normalized = normalized.replace("。", ".")
+    normalized = normalized.replace(",", ".")
+    normalized = re.sub(r"[^0-9:.]", "", normalized)
+    normalized = re.sub(r":+", ":", normalized)
+
+    if ":" not in normalized:
+        return normalized.strip(".")
+
+    left_part, right_part = normalized.split(":", 1)
+    left_digits = re.sub(r"[^0-9]", "", left_part)
+    right_clean = re.sub(r"[^0-9.]", "", right_part)
+
+    if right_clean.count(".") > 1:
+        first, *rest = right_clean.split(".")
+        right_clean = first + "." + "".join(rest)
+
+    right_clean = right_clean.strip(".")
+    left_digits = left_digits.lstrip("0") or ("0" if left_digits else "")
+
+    if left_digits:
+        try:
+            left_digits = str(int(left_digits))
+        except ValueError:
+            pass
+
+    formatted_right = right_clean
+    if formatted_right:
+        try:
+            dec = Decimal(formatted_right)
+        except InvalidOperation:
+            pass
+        else:
+            if dec == dec.to_integral():
+                formatted_right = format(dec.to_integral(), "f")
+            else:
+                formatted_right = format(dec.normalize(), "f")
+
+    if left_digits and formatted_right:
+        return f"{left_digits}:{formatted_right}"
+    if left_digits:
+        return left_digits
+    if formatted_right:
+        return formatted_right
+    return ""
 
 
 def read_easy(img, allow_dot: bool = False):
@@ -373,12 +428,8 @@ def read_temp_roi(roi):
 
 
 def read_ie_roi(roi):
-    text, _ = read_easy(roi, allow_dot=False)
-    normalized = sanitize_ocr_text(text)
-    normalized = normalized.replace("\uFF1A", ":")
-    normalized = normalized.replace("/", ":")
-    normalized = re.sub(r"[^0-9:]", "", normalized)
-    return normalized
+    text, _ = read_easy(roi, allow_dot=True)
+    return normalize_ie_text(text)
 
 
 def normalize_vent_mode_label(label: str) -> str:
