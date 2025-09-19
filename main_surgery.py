@@ -13,6 +13,22 @@ from pathlib import Path
 import json
 from typing import List, Optional, Union, Dict, MutableMapping
 
+try:  # Optional import for shared configuration with vital_reader
+    from vital_reader import NON_PERSISTENT_COLUMNS as _VR_NON_PERSISTENT
+except Exception:  # pragma: no cover - fallback when vital_reader is unavailable or missing the constant
+    _VR_NON_PERSISTENT = None
+
+# Columns that should not be forward-filled when reading the vitals CSV.
+NON_PERSISTENT_VITAL_COLUMNS = {"furosemide_mg"}
+if _VR_NON_PERSISTENT:
+    if isinstance(_VR_NON_PERSISTENT, str):
+        NON_PERSISTENT_VITAL_COLUMNS.add(_VR_NON_PERSISTENT)
+    else:
+        try:
+            NON_PERSISTENT_VITAL_COLUMNS.update(_VR_NON_PERSISTENT)
+        except TypeError:
+            NON_PERSISTENT_VITAL_COLUMNS.add(str(_VR_NON_PERSISTENT))
+
 # ==== 各評価ロジック ====
 from vitals.spo2_logic import evaluate_spo2
 from vitals.critical_spo2_logic import evaluate_critical_spo2
@@ -328,10 +344,15 @@ def get_latest_vitals(path: Union[Path, str]):
         if df.empty:
             return None
         # Forward-fill missing values so that failed OCR or partial updates
-        # do not erase previously captured vitals.  Any remaining NaNs (for
-        # columns that have never been populated) are converted to ``None`` to
-        # avoid propagating ``nan`` values to downstream logic.
-        df = df.ffill()
+        # do not erase previously captured vitals.  Columns marked as
+        # ``NON_PERSISTENT_VITAL_COLUMNS`` (e.g. bolus-only drug entries)
+        # are excluded from this operation so that a blank cell on the most
+        # recent row remains blank instead of reusing the last bolus value.
+        fill_columns = [
+            col for col in df.columns if col not in NON_PERSISTENT_VITAL_COLUMNS
+        ]
+        if fill_columns:
+            df.loc[:, fill_columns] = df.loc[:, fill_columns].ffill()
         last_row = df.iloc[-1]
         return {k: (None if pd.isna(v) else v) for k, v in last_row.items()}
     except Exception as e:

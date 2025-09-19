@@ -17,3 +17,27 @@ def test_get_latest_vitals_forward_fill(tmp_path):
     df.to_csv(path, index=False)
     latest = get_latest_vitals(path)
     assert latest["SBP"] == 120
+
+
+def test_get_latest_vitals_skips_non_persistent_columns(tmp_path):
+    df = pd.DataFrame(
+        [
+            {
+                "timestamp": "2025-08-23 15:50:00",
+                "SBP": 120,
+                "furosemide_mg": 3,
+            },
+            {
+                "timestamp": "2025-08-23 15:51:00",
+                "SBP": pd.NA,
+                "furosemide_mg": pd.NA,
+            },
+        ]
+    )
+    path = tmp_path / "vitals.csv"
+    df.to_csv(path, index=False)
+
+    latest = get_latest_vitals(path)
+
+    assert latest["SBP"] == 120
+    assert latest["furosemide_mg"] is None
