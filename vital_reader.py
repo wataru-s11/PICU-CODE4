@@ -445,6 +445,40 @@ VENT_MODE_TRANSLATIONS = [
     ("モード", "MODE"),
 ]
 
+VENT_MODE_CHAR_NORMALIZATION = str.maketrans({
+    "ｰ": "ー",
+    "－": "ー",
+    "−": "ー",
+    "‐": "ー",
+    "‑": "ー",
+    "–": "ー",
+    "—": "ー",
+    "―": "ー",
+    "一": "ー",
+    "─": "ー",
+    "━": "ー",
+    "￣": "ー",
+    "卜": "ト",
+    "ﾄ": "ト",
+})
+
+VENT_MODE_LONG_MARKS = "ーｰ－−‐‑–—―一─━￣"
+
+VENT_MODE_AUTO_LOOKALIKE_PATTERN = re.compile(
+    fr"オ[{re.escape(VENT_MODE_LONG_MARKS)}]*ル"
+)
+
+VENT_MODE_MODE_LOOKALIKE_PATTERN = re.compile(
+    fr"モ[{re.escape(VENT_MODE_LONG_MARKS)}]*ド"
+)
+
+PRESSURE_SUPPORT_MODE_TOKENS = {
+    "PS",
+    "PSV",
+    "SPONT",
+    "SPONTANEOUS",
+}
+
 
 def normalize_vent_mode_label(raw: str) -> str:
     """Normalize raw OCR output for the ventilator mode label."""
@@ -458,6 +492,14 @@ def normalize_vent_mode_label(raw: str) -> str:
     if not text:
         return ""
 
+    text = text.translate(VENT_MODE_CHAR_NORMALIZATION)
+
+    text = VENT_MODE_MODE_LOOKALIKE_PATTERN.sub("モード", text)
+    text_upper = text.upper()
+    if "MODE" in text_upper or "モード" in text:
+        text = VENT_MODE_AUTO_LOOKALIKE_PATTERN.sub("オート", text)
+        text_upper = text.upper()
+
     compact = text.replace(" ", "")
     if compact in VENT_MODE_CANONICAL:
         return VENT_MODE_CANONICAL[compact]
@@ -469,9 +511,37 @@ def normalize_vent_mode_label(raw: str) -> str:
         if source.replace(" ", "") in compact:
             text = text.replace(source, target)
             compact = text.replace(" ", "")
+            compact_upper = compact.upper()
 
     ascii_text = re.sub(r"\s+", " ", text).strip().upper()
     return VENT_MODE_CANONICAL.get(ascii_text, ascii_text)
+
+
+def is_pressure_support_mode(mode: str) -> bool:
+    """Return ``True`` if ``mode`` represents a pressure support style mode."""
+
+    if not mode:
+        return False
+
+    tokens = [t for t in re.split(r"[^A-Z0-9]+", mode.upper()) if t]
+    return any(token in PRESSURE_SUPPORT_MODE_TOKENS for token in tokens)
+
+
+def apply_pressure_support_split(results: dict) -> None:
+    """Populate ``PS`` or ``VTset`` based on the ventilator mode in ``results``."""
+
+    if "VTset" not in results and "PS" not in results:
+        return
+
+    vt_value = results.get("VTset", "") or ""
+    mode = results.get("VentMode", "") or ""
+
+    if is_pressure_support_mode(mode):
+        results["PS"] = vt_value
+        results["VTset"] = ""
+    else:
+        results["PS"] = ""
+        results["VTset"] = vt_value
 
 
 def parse_bp_text(raw: str):
@@ -710,6 +780,8 @@ def ocr_vitals_from_image(image_path):
     cvp_crop = crop_image(img, CVP_COORDS)
     results['CVP'] = read_cvp_roi(cvp_crop)
 
+    apply_pressure_support_split(results)
+
     if detect_spontaneous_breath(img, SPONT_BREATH_COORDS):
         print("自発呼吸検出")
         results['SpontaneousBreath'] = 'detected'
@@ -721,7 +793,7 @@ def ocr_vitals_from_image(image_path):
 ALL_COLUMNS = [
     "SBP", "DBP", "MAP", "HR", "SpO2", "BSR1", "BSR2", "Tskin", "Trect", "etCO2",
     "RR", "Ppeak", "Pmean", "PEEPact", "RRact", "I_E", "FiO2", "VTe", "VTi",
-    "PEEPset", "VTset", "VentMode", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
+    "PEEPset", "VTset", "PS", "VentMode", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
     "Ca", "Glu", "Lac", "tBil", "HCO3", "BE", "Alb"
 ]
 
