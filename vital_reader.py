@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import argparse
 import json
-import socket
+import sys
 from typing import Optional
 from decimal import Decimal, InvalidOperation
 try:  # pragma: no cover - optional dependency
@@ -35,6 +35,14 @@ try:  # pragma: no cover - optional dependency
     import easyocr  # type: ignore
 except Exception:  # pragma: no cover
     easyocr = None
+
+try:  # pragma: no cover - optional dependency
+    import tkinter as tk  # type: ignore
+    from tkinter import messagebox, simpledialog  # type: ignore
+except Exception:  # pragma: no cover
+    tk = None  # type: ignore
+    messagebox = None  # type: ignore
+    simpledialog = None  # type: ignore
 
 if easyocr:
     easyocr_reader = easyocr.Reader(['en', 'ja'], gpu=torch.cuda.is_available(), verbose=False)
@@ -651,25 +659,91 @@ def create_empty_vitals_csv(path):
         print(f"[INFO] 空のバイタルCSVを作成: {path}")
 
 def select_display_and_bed(vitals_base_dir: Path, beds_override: Optional[list[str]] = None):
-    """画面分割(4 or 8)とベッド番号を聞いてCSVパスとともに返す"""
+    """画面分割(4 または 8)とベッド番号を聞き取り、対象CSVパスを返す。"""
 
+    display_map = {"4": BED_COORDS_4, "8": BED_COORDS_8}
+    vitals_base_dir = Path(vitals_base_dir)
+    vitals_base_dir.mkdir(parents=True, exist_ok=True)
 
+    today_dir = vitals_base_dir / datetime.now().strftime("%Y%m%d")
+    today_dir.mkdir(parents=True, exist_ok=True)
+
+    use_gui = tk is not None and simpledialog is not None and messagebox is not None
+    root = None
+    if use_gui:
+        try:
+            root = tk.Tk()
+            root.withdraw()
+        except Exception:  # pragma: no cover - Tk が使えない環境では対話シェルへフォールバック
+            root = None
+            use_gui = False
+
+    can_use_cli = not use_gui and sys.stdin is not None and sys.stdin.isatty()
+    if not use_gui and not can_use_cli:
+        raise RuntimeError(
+            "対話ダイアログを表示できず標準入力も対話的ではありません。Tkinter を有効化するか、"
+            "対話的なシェルから実行してください。"
+        )
+
+    if not use_gui and can_use_cli:
+        print("[INFO] Tkinter が利用できないためコンソール入力にフォールバックします。")
+
+    def ask_input(title: str, prompt: str) -> Optional[str]:
+        if use_gui and root is not None:
+            response = simpledialog.askstring(title, prompt, parent=root)
+            return None if response is None else response.strip()
+        if can_use_cli:
+            try:
+                return input(f"{prompt} ").strip()
+            except EOFError:  # pragma: no cover - 非対話シェル
+                return None
+        return None
+
+    def show_error(title: str, message: str) -> None:
+        if use_gui and root is not None and messagebox is not None:
+            messagebox.showerror(title, message, parent=root)
+        else:
+            print(f"{title}: {message}")
+
+    display = None
+    display_prompt = "画面分割数を入力してください（4 または 8）："
+    while True:
+        answer = ask_input("画面分割選択", display_prompt)
+        if not answer:
+            show_error("エラー", "4 または 8 を入力してください。")
+            continue
+        if answer in display_map:
+            display = answer
+            break
+        show_error("エラー", "4 または 8 を入力してください。")
+
+    available_beds = sorted({str(b) for b in display_map[display].keys()}, key=int)
+    if beds_override:
+        overrides = [b for b in beds_override if b in available_beds]
+        if overrides:
+            valid_beds = sorted(set(overrides), key=int)
+        else:
+            print(
+                f"[WARN] ベッド指定 {beds_override} は利用可能なベッド {available_beds} に一致しません。既定値を使用します。"
+            )
+            valid_beds = available_beds
+    else:
+        valid_beds = available_beds
+
+    bed_options_text = "、".join(valid_beds)
+    bed_prompt = f"ベッド番号を入力してください（{bed_options_text}）："
 
     while True:
-        bed_choice = simpledialog.askstring(
-            "ベッド選択",
-            f"ベッド番号を入力してください（{min(valid_beds)}～{max(valid_beds)}):",
-            parent=root,
-        )
+        bed_choice = ask_input("ベッド選択", bed_prompt)
         if bed_choice in valid_beds:
             selected_path = today_dir / f"vitals_history_{bed_choice}.csv"
             create_empty_vitals_csv(str(selected_path))
-            root.destroy()
+            if root is not None:
+                root.destroy()
             return display, str(selected_path), int(bed_choice)
-        messagebox.showerror(
+        show_error(
             "エラー",
-            f"{min(valid_beds)}～{max(valid_beds)}のいずれかの数字を入力してください。",
-            parent=root,
+            f"{bed_options_text}のいずれかの数字を入力してください。",
         )
 
 def detect_spontaneous_breath(img, coords_list):
