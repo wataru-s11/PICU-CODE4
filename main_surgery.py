@@ -119,6 +119,8 @@ def resolve_path(
 VITALS_BASE_DIR = resolve_path("VITALS_BASE_DIR", "VITALS_BASE_DIR", DEFAULT_VITALS_BASE_CANDIDATES, must_exist=False)
 
 DEFAULT_PAUSE_MIN = 10  # 予備のデフォルト（Treeに数値が無い等のとき）
+BPUP_PITRESSIN_PAUSE_KEY = "BPUP_PITRESSIN_DROP_PAUSE_UNTIL"
+BPUP_PITRESSIN_PAUSE_SECONDS = 60 * 60
 
 # ---------------- ユーティリティ ----------------
 
@@ -216,7 +218,14 @@ def adjust_spo2_actions(instructions, surgery_type: str):
 
 # ---------------- 共通評価 ----------------
 
-def evaluate_all(vitals: dict, tree_df, thresholds, phase='a', bpup_tree_df=None):
+def evaluate_all(
+    vitals: dict,
+    tree_df,
+    thresholds,
+    phase='a',
+    bpup_tree_df=None,
+    previous_vitals=None,
+):
     """Evaluate all vitals and return intervention instructions.
     """
     instructions = []
@@ -250,7 +259,12 @@ def evaluate_all(vitals: dict, tree_df, thresholds, phase='a', bpup_tree_df=None
             except Exception:
                 elapsed = None
             instructions += evaluate_bpup(
-                vitals, chosen_tree, thresholds, phase, elapsed_minutes=elapsed
+                vitals,
+                chosen_tree,
+                thresholds,
+                phase,
+                previous_vitals=previous_vitals,
+                elapsed_minutes=elapsed,
             )
         elif sbp_l is not None and sbp < sbp_l:
             instructions += evaluate_bpdown(vitals, tree_df, thresholds, phase)
@@ -268,7 +282,15 @@ def evaluate_all(vitals: dict, tree_df, thresholds, phase='a', bpup_tree_df=None
 
 # ---------------- CVP follow-up ----------------
 
-def compute_cvp_follow_instructions(base_results, vitals, tree_df, thresholds, surgery_type, bpup_tree_df=None):
+def compute_cvp_follow_instructions(
+    base_results,
+    vitals,
+    tree_df,
+    thresholds,
+    surgery_type,
+    bpup_tree_df=None,
+    previous_vitals=None,
+):
     """Return follow-up instructions after CVP check.
 
     Any instructions that were already present alongside ``CVP_UPPER_CHECK`` in
@@ -278,7 +300,12 @@ def compute_cvp_follow_instructions(base_results, vitals, tree_df, thresholds, s
     """
     other = [r for r in base_results if r.get("id") != "CVP_UPPER_CHECK"]
     follow_raw = other + evaluate_all(
-        vitals, tree_df, thresholds, phase="a", bpup_tree_df=bpup_tree_df
+        vitals,
+        tree_df,
+        thresholds,
+        phase="a",
+        bpup_tree_df=bpup_tree_df,
+        previous_vitals=previous_vitals,
     )
     return [
         r
@@ -412,6 +439,42 @@ def _normalize_optional_float(value):
     return value
 
 
+def _merge_latest_drug_value(vitals, vitals_memory, canonical_key, aliases=()):
+    """Normalise drug values and preserve the latest entry.
+
+    Parameters
+    ----------
+    vitals : dict
+        Latest vitals row to be mutated in-place.
+    vitals_memory : dict
+        Persistent state dictionary storing ``"LATEST_DRUG_VALUES"``.
+    canonical_key : str
+        Key name used internally by the rule engine.
+    aliases : tuple[str, ...]
+        Alternative column names that may appear in the CSV.
+    """
+
+    latest = vitals_memory.setdefault("LATEST_DRUG_VALUES", {})
+    keys = (canonical_key,) + tuple(aliases)
+
+    value = None
+    for key in keys:
+        value = _normalize_optional_float(vitals.get(key))
+        if value is not None:
+            break
+
+    if value is None:
+        stored = latest.get(canonical_key)
+        if stored is not None:
+            for key in keys:
+                vitals[key] = stored
+        return
+
+    latest[canonical_key] = value
+    for key in keys:
+        vitals[key] = value
+
+
 def merge_latest_adrenaline(vitals, vitals_memory, aliases=("adrenaline", "Adrenaline", "ADR")):
     """Inject the most recent adrenaline value into ``vitals``.
 
@@ -423,24 +486,7 @@ def merge_latest_adrenaline(vitals, vitals_memory, aliases=("adrenaline", "Adren
     so that downstream logic can consistently rely on ``"adrenaline"``.
     """
 
-    latest = vitals_memory.setdefault("LATEST_DRUG_VALUES", {})
-    value = None
-    for key in aliases:
-        value = _normalize_optional_float(vitals.get(key))
-        if value is not None:
-            break
-
-    if value is None:
-        stored = latest.get("adrenaline")
-        if stored is not None:
-            vitals["adrenaline"] = stored
-        return
-
-    latest["adrenaline"] = value
-    vitals["adrenaline"] = value
-    for key in aliases:
-        if key in vitals:
-            vitals[key] = value
+    _merge_latest_drug_value(vitals, vitals_memory, "adrenaline", aliases)
 
 # ---------------- ベッド選択＆CSVパス解決 ----------------
 
@@ -500,6 +546,7 @@ def main_loop(
         "FRO_CVP_BASE": None,
         "FRO_DOSE_LOGGED": False,
         "FRO_LAST_DOSE_ENTRY": None,
+        BPUP_PITRESSIN_PAUSE_KEY: None,
         "LATEST_DRUG_VALUES": {},
     }
     print("\n==== 自動判定を開始（Ctrl+Cで終了）====")
@@ -509,7 +556,28 @@ def main_loop(
             print("[!] バイタル情報が不完全、再試行します")
             time.sleep(10); continue
 
+        previous_drug_values = dict(vitals_memory.get("LATEST_DRUG_VALUES", {}))
+
+        current_pit = None
+        for key in ("pitressin", "vasopressin", "Vasopressin", "PITRESSIN"):
+            current_pit = _normalize_optional_float(vitals.get(key))
+            if current_pit is not None:
+                break
+        prev_pit = previous_drug_values.get("pitressin")
+
+        if prev_pit is not None and current_pit is not None:
+            if current_pit < prev_pit:
+                vitals_memory[BPUP_PITRESSIN_PAUSE_KEY] = time.time() + BPUP_PITRESSIN_PAUSE_SECONDS
+            elif current_pit > prev_pit:
+                vitals_memory[BPUP_PITRESSIN_PAUSE_KEY] = None
+
         merge_latest_adrenaline(vitals, vitals_memory)
+        _merge_latest_drug_value(
+            vitals,
+            vitals_memory,
+            "pitressin",
+            aliases=("vasopressin", "Vasopressin", "PITRESSIN"),
+        )
         print("【判定直前しきい値】", thresholds)
         print("【判定直前バイタル】", vitals)
 
@@ -534,7 +602,14 @@ def main_loop(
                 )
 
             # A相
-            a_results_raw = evaluate_all(vitals, tree_df, thresholds, phase='a', bpup_tree_df=bpup_tree_df)
+            a_results_raw = evaluate_all(
+                vitals,
+                tree_df,
+                thresholds,
+                phase='a',
+                bpup_tree_df=bpup_tree_df,
+                previous_vitals=previous_drug_values,
+            )
             a_results = adjust_spo2_actions(dedup_by_id(a_results_raw), surgery_type)
 
             ids = {r['id'] for r in a_results}
@@ -606,7 +681,13 @@ def main_loop(
                     # CHECK直後に、A相のうちCHECK以外を再評価して表示
                     if not skip_follow:
                         follow = compute_cvp_follow_instructions(
-                            a_results, vitals, tree_df, thresholds, surgery_type, bpup_tree_df
+                            a_results,
+                            vitals,
+                            tree_df,
+                            thresholds,
+                            surgery_type,
+                            bpup_tree_df,
+                            previous_vitals=previous_drug_values,
                         )
                         if not follow:
                             comment = handle_cvp_observation_comment(vitals_memory)
@@ -731,7 +812,16 @@ def main_loop(
                 vitals[key] = vitals_memory[key]
 
             r_results = adjust_spo2_actions(
-                dedup_by_id(evaluate_all(vitals, tree_df, thresholds, phase='r', bpup_tree_df=bpup_tree_df)),
+                dedup_by_id(
+                    evaluate_all(
+                        vitals,
+                        tree_df,
+                        thresholds,
+                        phase='r',
+                        bpup_tree_df=bpup_tree_df,
+                        previous_vitals=previous_drug_values,
+                    )
+                ),
                 surgery_type,
             )
             for inst in r_results:

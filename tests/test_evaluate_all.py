@@ -213,6 +213,35 @@ def test_evaluate_all_bpdown_only_when_sbp_low(monkeypatch):
     }]
 
 
+def test_evaluate_all_forwards_previous_vitals(monkeypatch):
+    captured = {}
+
+    def mock_bpup(*args, **kwargs):
+        captured["previous"] = kwargs.get("previous_vitals")
+        return []
+
+    monkeypatch.setattr(ms, "evaluate_bpup", mock_bpup)
+    for fname in [
+        "evaluate_spo2",
+        "evaluate_critical_spo2",
+        "evaluate_sbp",
+        "evaluate_cvp",
+        "evaluate_adrenaline",
+        "evaluate_dobutamine",
+        "evaluate_bpdown",
+        "evaluate_bleed",
+        "evaluate_transfusion",
+    ]:
+        monkeypatch.setattr(ms, fname, lambda *a, **k: [])
+
+    vitals = {"SBP": 120}
+    thresholds = {"SBP_u": 90, "SBP_l": 70}
+    previous = {"pitressin": 0.05}
+    ms.evaluate_all(vitals, None, thresholds, previous_vitals=previous)
+
+    assert captured["previous"] is previous
+
+
 def test_merge_latest_adrenaline_reuses_previous_value():
     vitals_memory = {"LATEST_DRUG_VALUES": {}}
 
