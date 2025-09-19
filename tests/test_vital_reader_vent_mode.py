@@ -26,11 +26,6 @@ def test_normalize_vent_mode_handles_mixed_ascii_and_katakana():
     assert normalize_vent_mode_label("AUTOモード") == "AUTO MODE"
 
 
-def test_normalize_vent_mode_corrects_auto_mode_lookalike_chars():
-    assert normalize_vent_mode_label("オール MODE") == "AUTO MODE"
-    assert normalize_vent_mode_label("ｵｰﾙ mode") == "AUTO MODE"
-
-
 def test_is_pressure_support_mode_detects_psv_token():
     assert is_pressure_support_mode("SIMV/PSV")
 

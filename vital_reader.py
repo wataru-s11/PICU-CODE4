@@ -21,11 +21,6 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 try:  # pragma: no cover - optional dependency
-    import tensorflow as tf  # type: ignore
-except Exception:  # pragma: no cover
-    tf = None
-
-try:  # pragma: no cover - optional dependency
     import torch  # type: ignore
 except Exception:  # pragma: no cover
     torch = None
@@ -47,13 +42,6 @@ else:  # pragma: no cover - easyocr not available
 
 from bed_coords import BED_COORDS_8
 from bed_coords_4 import BED_COORDS_4
-
-# Optional ML model for CVP and other analyses
-cvp_model = None
-# Optional model and metadata for spontaneous-breathing detection (may be None)
-spont_breath_model = None
-spont_breath_meta = None
-spont_breath_transform = None
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -126,6 +114,333 @@ def guard_ok(crop_bgr, p=DEFAULT_GUARD_PARAMS):
     )
 
 # =========================
+# OCR / 画像ユーティリティ
+# =========================
+
+# These globals are populated at runtime once the user selects the screen
+# layout.  Providing safe defaults keeps the module importable for unit tests
+# and makes helper functions usable without running the interactive workflow.
+BP_COMBINED_COORD = (0, 0, 0, 0)
+CVP_COORDS = (0, 0, 0, 0)
+vital_crop: dict[str, tuple[int, int, int, int]] = {}
+SPONT_BREATH_COORDS: list[tuple[int, int, int, int]] = []
+
+
+def crop_image(img, coord):
+    """Safely crop ``img`` according to ``coord``.
+
+    ``coord`` is expected to be a four element tuple ``(x, y, w, h)``.  The
+    function clamps the region so that it always lies inside ``img`` and
+    supports both :class:`numpy.ndarray` inputs (the typical OpenCV image) and
+    nested Python sequences which are convenient for lightweight tests.
+    """
+
+    if img is None:
+        raise ValueError("img must not be None")
+
+    if not coord:
+        return img
+
+    x, y, w, h = coord
+    x0 = max(0, int(x))
+    y0 = max(0, int(y))
+    w = max(0, int(w))
+    h = max(0, int(h))
+    x1 = x0 + w
+    y1 = y0 + h
+
+    if np is not None and isinstance(img, np.ndarray):
+        height, width = img.shape[:2]
+        x1 = min(width, x1)
+        y1 = min(height, y1)
+        x0 = min(x0, width)
+        y0 = min(y0, height)
+        return img[y0:y1, x0:x1].copy()
+
+    # Fallback for simple list-of-lists images used in tests
+    rows = img[y0:y1]
+    return [row[x0:x1] for row in rows]
+
+
+def sanitize_ocr_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", str(text))
+    normalized = normalized.replace("\u3000", " ")
+    normalized = normalized.strip()
+    return re.sub(r"\s+", "", normalized)
+
+
+def read_easy(img, allow_dot: bool = False):
+    """Run EasyOCR on ``img`` and return the concatenated text.
+
+    The function gracefully handles environments where EasyOCR (and its heavy
+    dependencies) are not available by returning an empty result.
+    """
+
+    if easyocr_reader is None or img is None:
+        return "", 0.0
+
+    np_img = None
+    if np is not None and isinstance(img, np.ndarray):
+        np_img = img
+    elif np is not None:
+        try:
+            np_img = np.array(img)
+        except Exception:
+            np_img = None
+
+    if np_img is None or np_img.size == 0:
+        return "", 0.0
+
+    results = easyocr_reader.readtext(np_img, detail=1, paragraph=False)
+    texts = []
+    confidences = []
+    for _, text, conf in results:
+        cleaned = sanitize_ocr_text(text)
+        if not cleaned:
+            continue
+        texts.append(cleaned)
+        confidences.append(float(conf))
+
+    joined = "".join(texts)
+    if not allow_dot:
+        joined = joined.replace(".", "")
+    joined = joined.strip()
+    confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return joined, confidence
+
+
+def _bp_penalty(value: int, low: int, high: int) -> int:
+    if low <= value <= high:
+        return 0
+    if value < low:
+        return low - value
+    return value - high
+
+
+def _split_bp_digits(digits: str) -> tuple[str, str]:
+    if not digits:
+        return "", ""
+    best = (digits, "")
+    best_score = float("inf")
+    for idx in range(1, len(digits)):
+        left = digits[:idx]
+        right = digits[idx:]
+        try:
+            sbp = int(left)
+            dbp = int(right)
+        except ValueError:
+            continue
+        score = _bp_penalty(sbp, 60, 260) + _bp_penalty(dbp, 20, 200)
+        if score < best_score:
+            best_score = score
+            best = (str(sbp), str(dbp))
+    return best
+
+
+def _refine_bp_values(sbp: str, dbp: str, map_val: str) -> tuple[str, str]:
+    """Correct implausible blood pressure splits when possible."""
+
+    if not sbp or not dbp:
+        return sbp, dbp
+
+    try:
+        sbp_int = int(sbp)
+        dbp_int = int(dbp)
+    except ValueError:
+        return sbp, dbp
+
+    if sbp_int >= dbp_int:
+        return sbp, dbp
+
+    map_int: Optional[int] = None
+    if map_val:
+        try:
+            map_int = int(map_val)
+        except ValueError:
+            map_int = None
+
+    def score(value: int) -> float:
+        if map_int is not None:
+            approx_map = round((sbp_int + 2 * value) / 3)
+            return abs(approx_map - map_int)
+        return abs(sbp_int - value)
+
+    best_val: Optional[int] = None
+    best_score = score(dbp_int)
+
+    for start in range(1, len(dbp)):
+        candidate_text = dbp[start:].lstrip("0")
+        if not candidate_text:
+            continue
+        try:
+            candidate_val = int(candidate_text)
+        except ValueError:
+            continue
+        if candidate_val < 20 or candidate_val > sbp_int:
+            continue
+        candidate_score = score(candidate_val)
+        if candidate_score < best_score:
+            best_score = candidate_score
+            best_val = candidate_val
+
+    if best_val is not None:
+        return str(sbp_int), str(best_val)
+
+    return sbp, dbp
+
+
+def parse_bp_text(raw_text: str) -> tuple[str, str, str, str]:
+    """Parse blood pressure text into components.
+
+    The monitor sometimes emits strings such as ``"11.0/97(57)"`` or even
+    ``"11097(57"``.  The function normalises these variations, attempting to
+    recover the systolic, diastolic and mean arterial pressure as strings.
+    """
+
+    normalized = sanitize_ocr_text(raw_text)
+    if not normalized:
+        return "", "", "", ""
+
+    normalized = normalized.replace(",", ".")
+    normalized = normalized.replace(".", "")
+
+    map_val = ""
+    map_match = re.search(r"\((\d{1,3})\)", normalized)
+    if not map_match:
+        map_match = re.search(r"\((\d{1,3})", normalized)
+    if map_match:
+        map_val = map_match.group(1)
+        normalized = normalized[: map_match.start()]
+
+    main = normalized
+    sbp = ""
+    dbp = ""
+    if "/" in main:
+        left, right = main.split("/", 1)
+        sbp = re.sub(r"\D", "", left)
+        dbp = re.sub(r"\D", "", right)
+    else:
+        digits = re.sub(r"\D", "", main)
+        sbp, dbp = _split_bp_digits(digits)
+
+    sbp = sbp.lstrip("0") or sbp
+    dbp = dbp.lstrip("0") or dbp
+
+    sbp, dbp = _refine_bp_values(sbp, dbp, map_val)
+
+    sanitized = ""
+    if sbp and dbp:
+        sanitized = f"{sbp}/{dbp}"
+    elif sbp:
+        sanitized = sbp
+    elif dbp:
+        sanitized = dbp
+    if map_val:
+        sanitized = f"{sanitized}({map_val})" if sanitized else f"({map_val})"
+
+    return sanitized, sbp, dbp, map_val
+
+
+def read_bp_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    return parse_bp_text(text)
+
+
+def sanitize_numeric_text(text: str, allow_dot: bool = False, allow_sign: bool = False) -> str:
+    normalized = sanitize_ocr_text(text)
+    if not normalized:
+        return ""
+    allowed = "0123456789"
+    if allow_dot:
+        allowed += "."
+    if allow_sign:
+        allowed += "+-"
+    cleaned = "".join(ch for ch in normalized if ch in allowed)
+    if allow_dot:
+        cleaned = cleaned.strip(".")
+    return cleaned
+
+
+def read_num_roi(roi, allow_dot: bool = False, allow_sign: bool = False):
+    text, _ = read_easy(roi, allow_dot=allow_dot)
+    return sanitize_numeric_text(text, allow_dot=allow_dot, allow_sign=allow_sign)
+
+
+def read_temp_roi(roi):
+    return read_num_roi(roi, allow_dot=True, allow_sign=True)
+
+
+def read_ie_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    normalized = sanitize_ocr_text(text)
+    normalized = normalized.replace("\uFF1A", ":")
+    normalized = normalized.replace("/", ":")
+    normalized = re.sub(r"[^0-9:]", "", normalized)
+    return normalized
+
+
+def normalize_vent_mode_label(label: str) -> str:
+    if not label:
+        return ""
+    text = unicodedata.normalize("NFKC", str(label))
+    replacements = [
+        ("オートモード", " AUTO MODE "),
+        ("オート", " AUTO "),
+        ("モード", " MODE "),
+    ]
+    for src, dst in replacements:
+        text = text.replace(src, dst)
+    text = text.replace("\u3000", " ")
+    text = re.sub(r"[\s_]+", " ", text)
+    text = text.strip()
+    text = text.upper()
+    return re.sub(r"\s+", " ", text)
+
+
+def is_pressure_support_mode(label: str) -> bool:
+    normalized = normalize_vent_mode_label(label)
+    if not normalized:
+        return False
+    tokens = re.split(r"[\s/+\-]+", normalized)
+    token_set = {t for t in tokens if t}
+    if "PRESSURE" in token_set and "SUPPORT" in token_set:
+        return True
+    ps_tokens = {"PS", "PSV", "P.S", "PRESSURESUPPORT", "SPONT", "SPONTANEOUS"}
+    if any(token in ps_tokens for token in token_set):
+        return True
+    if "PRESSURE SUPPORT" in normalized:
+        return True
+    return False
+
+
+def apply_pressure_support_split(results):
+    if results is None:
+        return
+
+    mode = results.get("VentMode", "")
+    vtset_val = results.get("VTset", "")
+    vtset_str = "" if vtset_val is None else str(vtset_val)
+
+    if is_pressure_support_mode(mode):
+        results["PS"] = vtset_str
+        results["VTset"] = ""
+    else:
+        results.setdefault("PS", "")
+
+
+def read_mode_roi(roi):
+    text, _ = read_easy(roi, allow_dot=False)
+    return normalize_vent_mode_label(text)
+
+
+def read_cvp_roi(roi):
+
+    text, _ = read_easy(roi, allow_dot=False)
+    return sanitize_numeric_text(text)
+
+# =========================
 # 設定ロード
 # =========================
 
@@ -172,9 +487,6 @@ def resolve_path(arg_val, env_name, config, key, candidates=None, must_exist=Tru
     raise ValueError(f"{key} is not specified or not found. Set via argument, env {env_name}, config, or place the file at one of default locations.")
 
 # 既定候補（あなたの環境向け）
-DEFAULT_CVP_MODEL_CANDIDATES = [
-    r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\CVP2\\cvp_model.keras",
-]
 DEFAULT_IMAGE_BASE_CANDIDATES = [
     r"Z:\\image",
 ]
@@ -195,19 +507,54 @@ DEFAULT_SPONT_BREATH_META_CANDIDATES = [
 # =========================
 
 def init_resources(
-    model_path: Path,
     spont_breath_model_path: Optional[Path] = None,
     spont_breath_meta_path: Optional[Path] = None,
 ):
-    """Load optional heavy resources such as ML models."""
+    """Load optional resources such as the spontaneous-breathing model."""
 
-    global cvp_model, spont_breath_model, spont_breath_meta, spont_breath_transform
+    global spont_breath_model, spont_breath_meta, spont_breath_transform
+
+    spont_breath_model = None
+    spont_breath_meta = None
+    spont_breath_transform = None
+
+    if spont_breath_model_path is None:
+        return
+
+    if torch is None:
+        print("[WARN] PyTorchが利用できないため自発呼吸モデルを読み込みません。")
+        return
+
+    if Image is None:
+        print("[WARN] Pillowが利用できないため自発呼吸モデルを読み込みません。")
+        return
+
     try:
-        print(f"Loading CVP model from: {model_path}")
-        cvp_model = tf.keras.models.load_model(str(model_path))
-    except Exception as e:
-        raise RuntimeError(f"CVPモデル読み込み失敗: {model_path} -> {e}")
+        meta: dict[str, object] = {}
+        if spont_breath_meta_path and Path(spont_breath_meta_path).is_file():
+            with open(spont_breath_meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
 
+        backbone = str(meta.get("backbone", "mobilenet_v3_small")) if meta else "mobilenet_v3_small"
+        img_h = int(meta.get("img_h", 128)) if meta else 128
+        img_w = int(meta.get("img_w", 512)) if meta else 512
+
+        model, transform = build_spont_breath_model(backbone, img_h, img_w)
+        state = torch.load(str(spont_breath_model_path), map_location="cpu")
+        model.load_state_dict(state, strict=False)
+        model.eval()
+
+        spont_breath_model = model
+        spont_breath_transform = transform
+        spont_breath_meta = meta
+        print(f"自発呼吸モデルを読み込みました: {spont_breath_model_path}")
+        if spont_breath_meta_path:
+            print(f"自発呼吸メタデータ: {spont_breath_meta_path}")
+    except Exception as exc:  # pragma: no cover - best effort logging
+        print(f"[WARN] 自発呼吸モデル読み込み失敗: {exc}")
+        spont_breath_model = None
+        spont_breath_transform = None
+        spont_breath_meta = None
 
 
 # =========================
@@ -216,7 +563,6 @@ def init_resources(
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cvp-model", help="Path to CVP model (.keras)")
     parser.add_argument(
         "--spont-breath-model",
         help="Path to spontaneous-breathing model (.keras)",
@@ -233,64 +579,6 @@ def parse_args():
         help="Comma-separated bed numbers to allow. Overrides host-based default.",
     )
     return parser.parse_args()
-
-# =========================
-# CVP 予測
-# =========================
-
-try:
-    with open(Path(__file__).with_name("class_indices.json"), "r", encoding="utf-8") as f:
-        class_indices = json.load(f)
-except FileNotFoundError:  # pragma: no cover - fallback for tests
-    class_indices = {str(i): i for i in range(16)}
-index_to_label = {v: k for k, v in class_indices.items()}
-
-def predict_cvp_from_image(img):
-    """Return the predicted CVP value from a cropped image.
-
-    The function resizes the image to the model's expected size and applies
-    light-weight preprocessing to improve digit recognition under various
-    lighting conditions.  When the model has only a single channel, the image
-    is converted to grayscale.  For three-channel models, the grayscale output
-    is duplicated across RGB channels so that the preprocessing remains
-    effective regardless of the original model configuration.
-    """
-
-    input_shape = getattr(cvp_model, "input_shape", None)
-    if not input_shape or len(input_shape) < 4:
-        raise RuntimeError("cvp_model must have 4D input shape")
-
-    target_h, target_w, channels = input_shape[1], input_shape[2], input_shape[3]
-    img_resized = cv2.resize(img, (target_w, target_h))
-
-    # ---- Preprocessing ----------------------------------------------------
-    # Convert to grayscale for consistent preprocessing
-    gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY) if img_resized.ndim == 3 else img_resized
-    # Reduce noise and enhance contrast
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
-    # Binarize to highlight digits
-    _, bin_img = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    if channels == 1:
-        img_processed = bin_img[..., np.newaxis]
-    else:
-        img_processed = cv2.cvtColor(bin_img, cv2.COLOR_GRAY2BGR)
-
-    # ----------------------------------------------------------------------
-    img_norm = img_processed / 255.0
-    img_input = np.expand_dims(img_norm, axis=0)
-    pred = cvp_model.predict(img_input)
-
-    pred_index = np.argmax(pred)
-    confidence = pred[0][pred_index]
-    print(f"予測インデックス: {pred_index}, 信頼度: {confidence:.2f}")
-    print(f"index_to_label[{pred_index}] = {index_to_label.get(pred_index, '未定義')}")
-    label = index_to_label.get(pred_index, "")
-    if confidence < 0.8:
-        return "na"
-    return label
 
 # =========================
 # CSV作成・保存など
@@ -314,35 +602,7 @@ def create_empty_vitals_csv(path):
 def select_display_and_bed(vitals_base_dir: Path, beds_override: Optional[list[str]] = None):
     """画面分割(4 or 8)とベッド番号を聞いてCSVパスとともに返す
 
-    ホスト名に応じてベッド候補を切り替える。`beds_override` が指定された場合は
-    それを優先する。
-    """
-    import tkinter as tk
-    from tkinter import simpledialog, messagebox
 
-    today_dir = vitals_base_dir / datetime.now().strftime("%Y%m%d")
-    today_dir.mkdir(parents=True, exist_ok=True)
-
-    root = tk.Tk()
-    root.withdraw()
-
-    while True:
-        display = simpledialog.askstring(
-            "表示選択", "画面分割を入力してください（4 or 8）:", parent=root
-        )
-        if display in ("4", "8"):
-            break
-        messagebox.showerror("エラー", "4または8を入力してください。", parent=root)
-
-    host = socket.gethostname()
-    if beds_override is not None:
-        valid_beds = beds_override
-    elif host == "ws-PC1":
-        valid_beds = ["2", "3"]
-    elif host == "Super-WS":
-        valid_beds = ["4", "5"]
-    else:
-        valid_beds = ["2", "3", "4", "5"]
 
     while True:
         bed_choice = simpledialog.askstring(
@@ -360,338 +620,6 @@ def select_display_and_bed(vitals_base_dir: Path, beds_override: Optional[list[s
             f"{min(valid_beds)}～{max(valid_beds)}のいずれかの数字を入力してください。",
             parent=root,
         )
-
-# =========================
-# 画像処理・OCR
-# =========================
-
-def crop_image(img, coords):
-    x, y, w, h = coords
-    return img[y:y + h, x:x + w]
-
-
-def upsharp_gray(bgr, scale=3):
-    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    if scale != 1:
-        g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    blur = cv2.GaussianBlur(g, (0, 0), 1.0)
-    return cv2.addWeighted(g, 1.4, blur, -0.4, 0)
-
-
-def to_bin(gray):
-    return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-
-
-def read_easy(img, allow):
-    if easyocr_reader is None:
-        return "", 0.0
-    res = easyocr_reader.readtext(img, detail=1, paragraph=False, allowlist=allow)
-    if not res:
-        return "", 0.0
-    res = sorted(res, key=lambda r: min(p[0] for p in r[0]))
-    texts, confs = [], []
-    for _, text, conf in res:
-        t = ''.join(ch for ch in text if ch in allow)
-        if t:
-            texts.append(t)
-            confs.append(float(conf))
-    return ''.join(texts), (sum(confs) / len(confs) if confs else 0.0)
-
-
-def best_of(cands):
-    best, score = "", -1
-    for s, c in cands:
-        s2 = s.replace('O', '0').replace('o', '0').strip()
-        sc = c + len(s2)
-        if sc > score:
-            best, score = s2, sc
-    return best
-
-
-ALLOW_NUM = '0123456789'
-ALLOW_NUM_DOT = '0123456789.'
-ALLOW_BP = '0123456789()/'
-ALLOW_IE = '0123456789:.'
-ALLOW_MODE_ASC = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/()+-=<> "
-    "ァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテト"
-    "ナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンヴガギグゲゴ"
-    "ザジズゼゾダヂヅデドバビブベボパピプペポ・\u3000"
-)
-
-PAT_BP = re.compile(r'(\d{2,3})/(\d{2,3})\(?([0-9]{2,3})\)?')
-PAT_BP_TOKEN = re.compile(r'\d+(?:\.\d+)?')
-PREFERRED_BP_SPLITS = [
-    (3, 2, 2),
-    (3, 3, 2),
-    (3, 2, 3),
-    (2, 3, 2),
-    (2, 2, 3),
-    (3, 3, 3),
-    (2, 3, 3),
-    (2, 2, 2),
-]
-
-
-VENT_MODE_CANONICAL = {
-    "AUTO": "AUTO",
-    "AUTO MODE": "AUTO MODE",
-    "AUTOMODE": "AUTO MODE",
-}
-
-VENT_MODE_TRANSLATIONS = [
-    ("オートモード", "AUTO MODE"),
-    ("オート", "AUTO"),
-    ("モード", "MODE"),
-]
-
-VENT_MODE_CHAR_NORMALIZATION = str.maketrans({
-    "ｰ": "ー",
-    "－": "ー",
-    "−": "ー",
-    "‐": "ー",
-    "‑": "ー",
-    "–": "ー",
-    "—": "ー",
-    "―": "ー",
-    "一": "ー",
-    "─": "ー",
-    "━": "ー",
-    "￣": "ー",
-    "卜": "ト",
-    "ﾄ": "ト",
-})
-
-VENT_MODE_LONG_MARKS = "ーｰ－−‐‑–—―一─━￣"
-
-VENT_MODE_AUTO_LOOKALIKE_PATTERN = re.compile(
-    fr"オ[{re.escape(VENT_MODE_LONG_MARKS)}]*ル"
-)
-
-VENT_MODE_MODE_LOOKALIKE_PATTERN = re.compile(
-    fr"モ[{re.escape(VENT_MODE_LONG_MARKS)}]*ド"
-)
-
-PRESSURE_SUPPORT_MODE_TOKENS = {
-    "PS",
-    "PSV",
-    "SPONT",
-    "SPONTANEOUS",
-}
-
-
-def normalize_vent_mode_label(raw: str) -> str:
-    """Normalize raw OCR output for the ventilator mode label."""
-
-    if not raw:
-        return ""
-
-    text = unicodedata.normalize("NFKC", raw)
-    text = text.replace("\u3000", " ")
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return ""
-
-    text = text.translate(VENT_MODE_CHAR_NORMALIZATION)
-
-    text = VENT_MODE_MODE_LOOKALIKE_PATTERN.sub("モード", text)
-    text_upper = text.upper()
-    if "MODE" in text_upper or "モード" in text:
-        text = VENT_MODE_AUTO_LOOKALIKE_PATTERN.sub("オート", text)
-        text_upper = text.upper()
-
-    compact = text.replace(" ", "")
-    if compact in VENT_MODE_CANONICAL:
-        return VENT_MODE_CANONICAL[compact]
-    compact_upper = compact.upper()
-    if compact_upper in VENT_MODE_CANONICAL:
-        return VENT_MODE_CANONICAL[compact_upper]
-
-    for source, target in VENT_MODE_TRANSLATIONS:
-        if source.replace(" ", "") in compact:
-            text = text.replace(source, target)
-            compact = text.replace(" ", "")
-            compact_upper = compact.upper()
-
-    ascii_text = re.sub(r"\s+", " ", text).strip().upper()
-    return VENT_MODE_CANONICAL.get(ascii_text, ascii_text)
-
-
-def is_pressure_support_mode(mode: str) -> bool:
-    """Return ``True`` if ``mode`` represents a pressure support style mode."""
-
-    if not mode:
-        return False
-
-    tokens = [t for t in re.split(r"[^A-Z0-9]+", mode.upper()) if t]
-    return any(token in PRESSURE_SUPPORT_MODE_TOKENS for token in tokens)
-
-
-def apply_pressure_support_split(results: dict) -> None:
-    """Populate ``PS`` or ``VTset`` based on the ventilator mode in ``results``."""
-
-    if "VTset" not in results and "PS" not in results:
-        return
-
-    vt_value = results.get("VTset", "") or ""
-    mode = results.get("VentMode", "") or ""
-
-    if is_pressure_support_mode(mode):
-        results["PS"] = vt_value
-        results["VTset"] = ""
-    else:
-        results["PS"] = ""
-        results["VTset"] = vt_value
-
-
-def parse_bp_text(raw: str):
-    """Normalize and parse the SBP/DBP/MAP triple from ``raw`` text."""
-
-    sanitized = ''.join(ch for ch in raw if ch in ALLOW_BP)
-    normalized = sanitized or raw
-    match = PAT_BP.search(normalized)
-    if match:
-        return normalized, match.group(1), match.group(2), match.group(3)
-
-    matches = list(PAT_BP_TOKEN.finditer(raw))
-    tokens = []
-    for idx, m in enumerate(matches):
-        token = m.group()
-        if '.' in token:
-            if token.endswith('.0'):
-                base = token[:-2]
-                after = raw[m.end():]
-                keep_zero = after.startswith('/')
-                if idx == 0 and len(base) <= 2:
-                    keep_zero = True
-                token = f"{base}0" if keep_zero else base
-            else:
-                token = token.replace('.', '')
-        tokens.append(token)
-
-    tokens = [tok for tok in tokens if tok]
-    if len(tokens) >= 3:
-        return normalized, tokens[0], tokens[1], tokens[2]
-
-    digits_only = ''.join(ch for ch in normalized if ch.isdigit())
-    if not digits_only:
-        digits_only = ''.join(ch for ch in raw if ch.isdigit())
-
-    if len(tokens) == 2 and tokens[0] and tokens[1]:
-        first, last = tokens
-        for sbp_len in (3, 2):
-            for dbp_len in (2, 3):
-                if sbp_len + dbp_len != len(first):
-                    continue
-                sbp = first[:sbp_len]
-                dbp = first[sbp_len:]
-                if sbp and dbp:
-                    return normalized, sbp, dbp, last
-
-    for lengths in PREFERRED_BP_SPLITS:
-        l1, l2, l3 = lengths
-        if l1 + l2 + l3 != len(digits_only):
-            continue
-        sbp = digits_only[:l1]
-        dbp = digits_only[l1:l1 + l2]
-        map_val = digits_only[l1 + l2:l1 + l2 + l3]
-        if sbp and dbp and map_val:
-            return normalized, sbp, dbp, map_val
-
-    return normalized, "", "", ""
-
-
-def read_bp_roi(roi):
-    red = cv2.subtract(roi[:, :, 2], cv2.max(roi[:, :, 0], roi[:, :, 1]))
-    red = cv2.normalize(red, None, 0, 255, cv2.NORM_MINMAX)
-    red = cv2.resize(red, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    red = cv2.addWeighted(red, 1.4, cv2.GaussianBlur(red, (0, 0), 1.0), -0.4, 0)
-    t1, c1 = read_easy(red, ALLOW_BP)
-    t2, c2 = read_easy(to_bin(red), ALLOW_BP)
-    raw = best_of([(t1, c1), (t2, c2)])
-    return parse_bp_text(raw)
-
-
-def hsv_mask(bgr, low, high):
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    return cv2.inRange(hsv, np.array(low, np.uint8), np.array(high, np.uint8)), hsv[:, :, 2]
-
-
-def blue_enhance(bgr, scale=3):
-    m, v = hsv_mask(bgr, (100, 80, 40), (140, 255, 255))
-    gray = cv2.bitwise_and(v, v, mask=m)
-    if scale != 1:
-        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    return cv2.addWeighted(gray, 1.6, cv2.GaussianBlur(gray, (0, 0), 1.0), -0.6, 0)
-
-
-def orange_enhance(bgr, scale=3):
-    m1, v = hsv_mask(bgr, (10, 80, 40), (25, 255, 255))
-    m2, _ = hsv_mask(bgr, (25, 60, 40), (35, 255, 255))
-    m = cv2.max(m1, m2)
-    gray = cv2.bitwise_and(v, v, mask=m)
-    if scale != 1:
-        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    return cv2.addWeighted(gray, 1.5, cv2.GaussianBlur(gray, (0, 0), 1.0), -0.5, 0)
-
-
-def read_cvp_roi(roi):
-    blue = blue_enhance(roi, 3)
-    t1, c1 = read_easy(blue, ALLOW_NUM + '()')
-    t2, c2 = read_easy(to_bin(blue), ALLOW_NUM + '()')
-    raw = best_of([(t1, c1), (t2, c2)])
-    m = re.search(r'\(?([0-9]{1,2})\)?', raw)
-    return m.group(1) if m else raw
-
-
-def normalize_temp(s):
-    m = re.search(r'(\d{2}\.\d)', s)
-    if m:
-        return m.group(1)
-    m = re.search(r'(\d{3})', s)
-    if m:
-        k = m.group(1)
-        return f"{k[:2]}.{k[2]}"
-    return ""
-
-
-def read_temp_roi(roi):
-    x = orange_enhance(roi, 3)
-    t1, c1 = read_easy(x, ALLOW_NUM_DOT)
-    t2, c2 = read_easy(to_bin(x), ALLOW_NUM_DOT)
-    return normalize_temp(best_of([(t1, c1), (t2, c2)]).replace('..', '.'))
-
-
-def read_num_roi(roi, allow_dot=True):
-    g = upsharp_gray(roi, 3)
-    b = to_bin(g)
-    allow = ALLOW_NUM_DOT if allow_dot else ALLOW_NUM
-    t1, c1 = read_easy(g, allow)
-    t2, c2 = read_easy(b, allow)
-    return best_of([(t1, c1), (t2, c2)]).strip('.')
-
-
-def read_ie_roi(roi):
-    g = upsharp_gray(roi, 3)
-    b = to_bin(g)
-    t1, c1 = read_easy(g, ALLOW_IE)
-    t2, c2 = read_easy(b, ALLOW_IE)
-    s = best_of([(t1, c1), (t2, c2)])
-    m = re.search(r'(\d+)[\.:]([0-9]+(?:\.[0-9]+)?)', s)
-    if m:
-        s = f"{m.group(1)}:{m.group(2)}"
-    s = re.sub(r'^0+', '', s)
-    return s
-
-
-def read_mode_roi(roi):
-    g = upsharp_gray(roi, 3)
-    b = to_bin(g)
-    t1, c1 = read_easy(g, ALLOW_MODE_ASC)
-    t2, c2 = read_easy(b, ALLOW_MODE_ASC)
-    raw = best_of([(t1, c1), (t2, c2)])
-    return normalize_vent_mode_label(raw)
-
 
 def detect_spontaneous_breath(img, coords_list):
     """Detect spontaneous breathing by scanning ``coords_list``.
@@ -758,49 +686,11 @@ def detect_spontaneous_breath(img, coords_list):
     return False
 
 
-def ocr_vitals_from_image(image_path):
-    img = cv2.imread(image_path)
-    results = {}
-    bp_crop = crop_image(img, BP_COMBINED_COORD)
-    _, sbp, dbp, map_val = read_bp_roi(bp_crop)
-    results['SBP'] = sbp or ''
-    results['DBP'] = dbp or ''
-    results['MAP'] = map_val or ''
-    for key, coords in vital_crop.items():
-        crop = crop_image(img, coords)
-        if key == "VentMode":
-            result = read_mode_roi(crop)
-        elif key in ["Tskin", "Trect"]:
-            result = read_temp_roi(crop)
-        elif key == "I_E":
-            result = read_ie_roi(crop)
-        else:
-            result = read_num_roi(crop, allow_dot=True)
-        results[key] = result
-    cvp_crop = crop_image(img, CVP_COORDS)
-    results['CVP'] = read_cvp_roi(cvp_crop)
-
-    apply_pressure_support_split(results)
-
-    if detect_spontaneous_breath(img, SPONT_BREATH_COORDS):
-        print("自発呼吸検出")
-        results['SpontaneousBreath'] = 'detected'
     else:
         print("自発呼吸を検出しません")
         results['SpontaneousBreath'] = ''
     return results
 
-ALL_COLUMNS = [
-    "SBP", "DBP", "MAP", "HR", "SpO2", "BSR1", "BSR2", "Tskin", "Trect", "etCO2",
-    "RR", "Ppeak", "Pmean", "PEEPact", "RRact", "I_E", "FiO2", "VTe", "VTi",
-    "PEEPset", "VTset", "PS", "VentMode", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
-    "Ca", "Glu", "Lac", "tBil", "HCO3", "BE", "Alb"
-]
-
-# Columns that represent one-time events and should not be carried forward when
-# appending new vital rows. Currently only the IV bolus dose of furosemide is
-# treated as non-persistent so that it is logged only at the time of entry.
-NON_PERSISTENT_COLUMNS = {"furosemide_mg"}
 
 def save_vitals_to_csv(vitals_dict, csv_path):
     """Append ``vitals_dict`` to ``csv_path`` while preserving extra columns.
@@ -887,14 +777,6 @@ if __name__ == "__main__":
     # Display available 8-screen bed coordinate keys
     print(BED_COORDS_8.keys())
 
-    cvp_model_path = resolve_path(
-        args.cvp_model,
-        "CVP_MODEL_PATH",
-        config,
-        "CVP_MODEL_PATH",
-        candidates=DEFAULT_CVP_MODEL_CANDIDATES,
-        must_exist=True,
-    )
     try:
         spont_breath_model_path = resolve_path(
             args.spont_breath_model,
@@ -934,13 +816,12 @@ if __name__ == "__main__":
         must_exist=False,
     )
 
-    print(f"[PATH] CVP_MODEL_PATH = {cvp_model_path}")
     print(f"[PATH] SPONT_BREATH_MODEL_PATH = {spont_breath_model_path}")
     print(f"[PATH] SPONT_BREATH_META_PATH = {spont_breath_meta_path}")
     print(f"[PATH] IMAGE_FOLDER(base) = {image_folder}")
     print(f"[PATH] VITALS_BASE_DIR = {vitals_base_dir}")
 
-    init_resources(cvp_model_path, spont_breath_model_path, spont_breath_meta_path)
+    init_resources(spont_breath_model_path, spont_breath_meta_path)
 
     beds_override = None
     if args.beds:

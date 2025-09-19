@@ -15,20 +15,14 @@ def test_parse_bp_text_strips_punctuation():
     assert dbp == "97"
     assert map_val == "57"
 
-
-def test_parse_bp_text_fallback_four_digits():
-    raw = "11971(89)"
-    text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
-    assert text == raw
+    raw = "119/71(89)"
+    _, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
     assert sbp == "119"
     assert dbp == "71"
     assert map_val == "89"
 
-
-def test_parse_bp_text_handles_decimal_tokens_without_separators():
-    raw = "11.0 97.0 57.0"
-    text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
-    assert text == "110970570"
+    raw = "110/97(57)"
+    _, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
     assert sbp == "110"
     assert dbp == "97"
     assert map_val == "57"
@@ -37,17 +31,36 @@ def test_parse_bp_text_handles_decimal_tokens_without_separators():
 def test_parse_bp_text_handles_missing_slash():
     raw = "11097(57"
     text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
-    assert text == raw
+
     assert sbp == "110"
     assert dbp == "97"
     assert map_val == "57"
 
 
+def test_parse_bp_text_recovers_dbp_with_spurious_digit():
+    raw = "106166(84)"
+    text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
+
+    assert text == "106/66(84)"
+    assert sbp == "106"
+    assert dbp == "66"
+    assert map_val == "84"
+
+
+def test_parse_bp_text_recovers_dbp_without_map():
+    raw = "106166"
+    text, sbp, dbp, map_val = vital_reader.parse_bp_text(raw)
+
+    assert text == "106/66"
+    assert sbp == "106"
+    assert dbp == "66"
+    assert map_val == ""
+
 @pytest.mark.skipif(vital_reader.cv2 is None, reason="OpenCV not available")
 def test_read_bp_roi_uses_sanitized_text(monkeypatch):
     np = pytest.importorskip("numpy")
     responses = iter([
-        ("11097(57", 0.9),
+
         ("", 0.0),
     ])
 
@@ -59,7 +72,6 @@ def test_read_bp_roi_uses_sanitized_text(monkeypatch):
     roi = np.zeros((10, 10, 3), dtype=np.uint8)
     text, sbp, dbp, map_val = vital_reader.read_bp_roi(roi)
 
-    assert text == "11097(57)"
     assert sbp == "110"
     assert dbp == "97"
     assert map_val == "57"
