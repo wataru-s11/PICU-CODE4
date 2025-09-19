@@ -602,35 +602,7 @@ def create_empty_vitals_csv(path):
 def select_display_and_bed(vitals_base_dir: Path, beds_override: Optional[list[str]] = None):
     """画面分割(4 or 8)とベッド番号を聞いてCSVパスとともに返す
 
-    ホスト名に応じてベッド候補を切り替える。`beds_override` が指定された場合は
-    それを優先する。
-    """
-    import tkinter as tk
-    from tkinter import simpledialog, messagebox
 
-    today_dir = vitals_base_dir / datetime.now().strftime("%Y%m%d")
-    today_dir.mkdir(parents=True, exist_ok=True)
-
-    root = tk.Tk()
-    root.withdraw()
-
-    while True:
-        display = simpledialog.askstring(
-            "表示選択", "画面分割を入力してください（4 or 8）:", parent=root
-        )
-        if display in ("4", "8"):
-            break
-        messagebox.showerror("エラー", "4または8を入力してください。", parent=root)
-
-    host = socket.gethostname()
-    if beds_override is not None:
-        valid_beds = beds_override
-    elif host == "ws-PC1":
-        valid_beds = ["2", "3"]
-    elif host == "Super-WS":
-        valid_beds = ["4", "5"]
-    else:
-        valid_beds = ["2", "3", "4", "5"]
 
     while True:
         bed_choice = simpledialog.askstring(
@@ -714,49 +686,11 @@ def detect_spontaneous_breath(img, coords_list):
     return False
 
 
-def ocr_vitals_from_image(image_path):
-    img = cv2.imread(image_path)
-    results = {}
-    bp_crop = crop_image(img, BP_COMBINED_COORD)
-    _, sbp, dbp, map_val = read_bp_roi(bp_crop)
-    results['SBP'] = sbp or ''
-    results['DBP'] = dbp or ''
-    results['MAP'] = map_val or ''
-    for key, coords in vital_crop.items():
-        crop = crop_image(img, coords)
-        if key == "VentMode":
-            result = read_mode_roi(crop)
-        elif key in ["Tskin", "Trect"]:
-            result = read_temp_roi(crop)
-        elif key == "I_E":
-            result = read_ie_roi(crop)
-        else:
-            result = read_num_roi(crop, allow_dot=True)
-        results[key] = result
-    cvp_crop = crop_image(img, CVP_COORDS)
-    results['CVP'] = read_cvp_roi(cvp_crop)
-
-    apply_pressure_support_split(results)
-
-    if detect_spontaneous_breath(img, SPONT_BREATH_COORDS):
-        print("自発呼吸検出")
-        results['SpontaneousBreath'] = 'detected'
     else:
         print("自発呼吸を検出しません")
         results['SpontaneousBreath'] = ''
     return results
 
-ALL_COLUMNS = [
-    "SBP", "DBP", "MAP", "HR", "SpO2", "BSR1", "BSR2", "Tskin", "Trect", "etCO2",
-    "RR", "Ppeak", "Pmean", "PEEPact", "RRact", "I_E", "FiO2", "VTe", "VTi",
-    "PEEPset", "VTset", "PS", "VentMode", "CVP", "pH", "PaCO2", "pO2", "Hct", "K", "Na", "Cl",
-    "Ca", "Glu", "Lac", "tBil", "HCO3", "BE", "Alb"
-]
-
-# Columns that represent one-time events and should not be carried forward when
-# appending new vital rows. Currently only the IV bolus dose of furosemide is
-# treated as non-persistent so that it is logged only at the time of entry.
-NON_PERSISTENT_COLUMNS = {"furosemide_mg"}
 
 def save_vitals_to_csv(vitals_dict, csv_path):
     """Append ``vitals_dict`` to ``csv_path`` while preserving extra columns.
