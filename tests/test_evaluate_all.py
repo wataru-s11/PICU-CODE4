@@ -1,3 +1,5 @@
+import pytest
+
 import main_surgery as ms
 
 
@@ -209,3 +211,33 @@ def test_evaluate_all_bpdown_only_when_sbp_low(monkeypatch):
         "next_id": None,
         "comment": "",
     }]
+
+
+def test_merge_latest_adrenaline_reuses_previous_value():
+    vitals_memory = {"LATEST_DRUG_VALUES": {}}
+
+    vitals = {"Adrenaline": "0.2"}
+    ms.merge_latest_adrenaline(vitals, vitals_memory)
+    assert vitals["adrenaline"] == 0.2
+    assert vitals_memory["LATEST_DRUG_VALUES"]["adrenaline"] == 0.2
+
+    next_vitals = {}
+    ms.merge_latest_adrenaline(next_vitals, vitals_memory)
+    assert next_vitals["adrenaline"] == 0.2
+
+
+def test_tree_adrenaline_reduction_rule_triggers():
+    pytest.importorskip("yaml")
+    thresholds = {"CVP_u": 5, "SBP_u": 90, "Ad_u": 0.1}
+    tree_df = ms.load_tree("tree.yaml")
+
+    vitals = {"CVP": 4.0, "SBP": 100.0, "adrenaline": 0.2}
+    results = ms.evaluate_adrenaline(vitals, tree_df, thresholds)
+    ids = {r["id"] for r in results}
+    assert "AD_REDUCE_WHEN_HIGH_BP" in ids
+    message = [r["instruction"] for r in results if r["id"] == "AD_REDUCE_WHEN_HIGH_BP"]
+    assert message == ["アドレナリンを減量してもよいです。"]
+
+    vitals["adrenaline"] = 0.05
+    results = ms.evaluate_adrenaline(vitals, tree_df, thresholds)
+    assert "AD_REDUCE_WHEN_HIGH_BP" not in {r["id"] for r in results}

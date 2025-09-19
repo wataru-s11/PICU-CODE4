@@ -327,6 +327,8 @@ def prompt_thresholds():
         "SBP_u": get_val("SBP 上限 (SBP_u)", 90),
         "CVP_u": get_val("CVP 上限 (CVP_u)", 5),
         "CVP_c": get_val("Critical CVP 上限 (CVP_c)", 8),
+        "Ad_l": get_val("アドレナリン下限 (Ad_l)", 0.0),
+        "Ad_u": get_val("アドレナリン上限 (Ad_u)", 0.1),
     }
 
 
@@ -386,6 +388,60 @@ def update_furosemide_flags(vitals, vitals_memory):
         vitals_memory["FRO_LAST_DOSE_ENTRY"] = entry_key
         vitals_memory["FRO_DOSE_LOGGED"] = True
 
+
+def _normalize_optional_float(value):
+    """Return ``value`` as a float when possible, otherwise ``None``."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            value = float(s)
+        except ValueError:
+            return None
+    elif isinstance(value, (int, float)):
+        value = float(value)
+    else:
+        return None
+
+    if math.isnan(value):
+        return None
+    return value
+
+
+def merge_latest_adrenaline(vitals, vitals_memory, aliases=("adrenaline", "Adrenaline", "ADR")):
+    """Inject the most recent adrenaline value into ``vitals``.
+
+    The vitals CSV interleaves general vital signs and drug infusions.  When a
+    new vitals row is recorded without an updated adrenaline column the latest
+    dose should still be available for rule evaluation.  This helper keeps the
+    most recent non-empty value in ``vitals_memory`` and reuses it when
+    necessary.  It also normalises known alias keys (e.g. ``"Adrenaline"``)
+    so that downstream logic can consistently rely on ``"adrenaline"``.
+    """
+
+    latest = vitals_memory.setdefault("LATEST_DRUG_VALUES", {})
+    value = None
+    for key in aliases:
+        value = _normalize_optional_float(vitals.get(key))
+        if value is not None:
+            break
+
+    if value is None:
+        stored = latest.get("adrenaline")
+        if stored is not None:
+            vitals["adrenaline"] = stored
+        return
+
+    latest["adrenaline"] = value
+    vitals["adrenaline"] = value
+    for key in aliases:
+        if key in vitals:
+            vitals[key] = value
+
 # ---------------- ベッド選択＆CSVパス解決 ----------------
 
 def select_bed_and_csv(vitals_base_dir: Path) -> Path:
@@ -444,6 +500,7 @@ def main_loop(
         "FRO_CVP_BASE": None,
         "FRO_DOSE_LOGGED": False,
         "FRO_LAST_DOSE_ENTRY": None,
+        "LATEST_DRUG_VALUES": {},
     }
     print("\n==== 自動判定を開始（Ctrl+Cで終了）====")
     while True:
@@ -452,6 +509,7 @@ def main_loop(
             print("[!] バイタル情報が不完全、再試行します")
             time.sleep(10); continue
 
+        merge_latest_adrenaline(vitals, vitals_memory)
         print("【判定直前しきい値】", thresholds)
         print("【判定直前バイタル】", vitals)
 
@@ -460,8 +518,10 @@ def main_loop(
         update_furosemide_flags(vitals, vitals_memory)
 
         # 状態注入
-        for key in vitals_memory:
-            vitals[key] = vitals_memory[key]
+        for key, value in vitals_memory.items():
+            if key == "LATEST_DRUG_VALUES":
+                continue
+            vitals[key] = value
 
         # 新しいデータ行でのみ評価
         if last_timestamp is None or vitals['timestamp'] != last_timestamp:

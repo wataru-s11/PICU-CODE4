@@ -20,6 +20,8 @@ DEFAULT_THRESHOLDS: Dict[str, float] = {
     "SBP_u": 90.0,
     "CVP_u": 5.0,
     "CVP_c": 8.0,
+    "Ad_l": 0.0,
+    "Ad_u": 0.1,
 }
 
 
