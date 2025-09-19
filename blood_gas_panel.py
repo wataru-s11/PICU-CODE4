@@ -40,6 +40,8 @@ class BloodGasPanel(tk.Frame):
     def __init__(self, master: tk.Misc, csv_path: Optional[str] = None, **kwargs) -> None:
         super().__init__(master, **kwargs)
         self.vars: Dict[str, tk.DoubleVar] = {}
+        self.weight_var = tk.DoubleVar(value=0.0)
+        self.rbc_rate_var = tk.DoubleVar(value=0.0)
         # 採血記録: key="YYYY-mm-dd HH:MM"
         self.history: Dict[str, Dict[str, float]] = {}
         self.csv_path = Path(csv_path) if csv_path else None
@@ -58,6 +60,14 @@ class BloodGasPanel(tk.Frame):
             var = tk.DoubleVar(value=0.0)
             self.vars[key] = var
             ttk.Entry(grid, textvariable=var, width=10).grid(row=i, column=1, padx=4, pady=3)
+
+        weight_row = len(COLUMNS)
+        ttk.Label(grid, text="体重 (kg)").grid(row=weight_row, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(grid, textvariable=self.weight_var, width=10).grid(row=weight_row, column=1, padx=4, pady=3)
+
+        rbc_row = weight_row + 1
+        ttk.Label(grid, text="RBC輸血速度 (ml/h)").grid(row=rbc_row, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(grid, textvariable=self.rbc_rate_var, width=10).grid(row=rbc_row, column=1, padx=4, pady=3)
 
         # 疾患選択
         disf = ttk.Frame(self)
@@ -105,6 +115,8 @@ class BloodGasPanel(tk.Frame):
             return
         key = dt.strftime("%Y-%m-%d %H:%M")
         current = self.get_values()
+        current["weight_kg"] = self.weight_var.get()
+        current["rbc_ml_per_h"] = self.rbc_rate_var.get()
         self.history[key] = current
         self._export_excel_auto()
         if self.csv_path:
@@ -124,6 +136,8 @@ class BloodGasPanel(tk.Frame):
                 "HCO3": current.get("hco3"),
                 "BE": current.get("abe"),
                 "Alb": current.get("alb"),
+                "weight_kg": current.get("weight_kg"),
+                "rbc_ml_per_h": current.get("rbc_ml_per_h"),
             }
             save_vitals_to_csv(csv_vals, str(self.csv_path))
 
@@ -138,6 +152,27 @@ class BloodGasPanel(tk.Frame):
             ws.append([ts] + [rec.get(k, 0.0) for k, _ in COLUMNS])
         path = Path("blood_gas_panel.xlsx")
         wb.save(path)
+
+    def _get_previous_hct_record(self, current_dt: Optional[datetime] = None) -> Optional[Dict[str, float]]:
+        """Return the most recent history record prior to ``current_dt``."""
+
+        if not self.history:
+            return None
+
+        candidates = []
+        for ts_str, record in self.history.items():
+            try:
+                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+            if current_dt is None or ts < current_dt:
+                candidates.append((ts, record))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0])
+        return candidates[-1][1]
 
     def evaluate_current_data(self) -> Optional[Dict[str, object]]:
         """現在の入力値を ``bga_protocol`` で評価する."""
@@ -160,7 +195,36 @@ class BloodGasPanel(tk.Frame):
         except Exception as e:  # pragma: no cover - defensive
             messagebox.showerror("エラー", f"BGA評価に失敗しました: {e}")
             return None
-        messagebox.showinfo("BGA診断結果", "\n".join(result["messages"]))
+        messages = result.get("messages")
+        if not isinstance(messages, list):
+            messages = list(messages or [])
+            result["messages"] = messages
+
+        current_time = self.time_var.get().strip()
+        current_dt: Optional[datetime]
+        try:
+            current_dt = datetime.strptime(current_time, "%Y-%m-%d %H:%M") if current_time else None
+        except ValueError:
+            current_dt = None
+
+        previous_record = self._get_previous_hct_record(current_dt)
+        if previous_record is not None:
+            prev_hct = previous_record.get("hct")
+            current_hct = vals.get("hct", 0.0)
+            if prev_hct is not None and current_hct > prev_hct:
+                weight_kg = self.weight_var.get()
+                if weight_kg <= 0:
+                    weight_kg = float(previous_record.get("weight_kg") or 0.0)
+                rbc_rate = self.rbc_rate_var.get()
+                if rbc_rate <= 0:
+                    rbc_rate = float(previous_record.get("rbc_ml_per_h") or 0.0)
+                if weight_kg > 0:
+                    if rbc_rate >= weight_kg:
+                        messages.append("十分な輸血がされています")
+                    else:
+                        messages.append("血管漏出が増えている可能性…ピトレシン0.02–0.05増量")
+
+        messagebox.showinfo("BGA診断結果", "\n".join(messages))
         return result
 
 

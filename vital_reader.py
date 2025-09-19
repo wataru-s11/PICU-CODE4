@@ -600,7 +600,7 @@ def create_empty_vitals_csv(path):
         print(f"[INFO] 空のバイタルCSVを作成: {path}")
 
 def select_display_and_bed(vitals_base_dir: Path, beds_override: Optional[list[str]] = None):
-    """画面分割(4 or 8)とベッド番号を聞いてCSVパスとともに返す
+    """画面分割(4 or 8)とベッド番号を聞いてCSVパスとともに返す"""
 
 
 
@@ -684,12 +684,6 @@ def detect_spontaneous_breath(img, coords_list):
         if bright >= 0.4 * w:
             return True
     return False
-
-
-    else:
-        print("自発呼吸を検出しません")
-        results['SpontaneousBreath'] = ''
-    return results
 
 
 def save_vitals_to_csv(vitals_dict, csv_path):
