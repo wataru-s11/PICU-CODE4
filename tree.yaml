@@ -350,6 +350,15 @@ rules:
   - CVP
   actions:
   - NEXT:なし
+- id: AD_REDUCE_WHEN_HIGH_BP
+  when: vitals.get("CVP") < {{CVP_u}} and vitals.get("SBP") > {{SBP_u}} and vitals.get("adrenaline") > {{Ad_u}}
+  message: アドレナリンを減量してもよいです。
+  severity: info
+  tags:
+  - a,r
+  - AD
+  - SBP
+  - CVP
 - id: AD_U_02
   when: value == 0.2
   message: これ以上アドレナリンは上げられません。開胸またはECMOの準備をしてください。
