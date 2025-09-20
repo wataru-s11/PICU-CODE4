@@ -6,7 +6,7 @@ import time
 import math
 from datetime import datetime
 import tkinter as tk
-from tkinter import simpledialog, messagebox
+from tkinter import simpledialog, messagebox, ttk
 import re
 import os
 from pathlib import Path
@@ -247,10 +247,21 @@ def evaluate_all(
     instructions = []
     spo2_instructions = evaluate_spo2(vitals, tree_df, thresholds, phase)
     if any(i["id"] == "SPO2_CHECK" for i in spo2_instructions):
-        if vitals.get("SPO2_CHECK_DONE") == "Y":
-            spo2_instructions = [i for i in spo2_instructions if i["id"] != "SPO2_CHECK"]
+        if not is_five_minute_timestamp(vitals.get("timestamp")):
+            if vitals.get("SPO2_CHECK_DONE") == "Y":
+                spo2_instructions = [
+                    i for i in spo2_instructions if i["id"] != "SPO2_CHECK"
+                ]
+            else:
+                spo2_instructions = []
+        elif vitals.get("SPO2_CHECK_DONE") == "Y":
+            spo2_instructions = [
+                i for i in spo2_instructions if i["id"] != "SPO2_CHECK"
+            ]
         else:
-            spo2_instructions = [i for i in spo2_instructions if i["id"] == "SPO2_CHECK"]
+            spo2_instructions = [
+                i for i in spo2_instructions if i["id"] == "SPO2_CHECK"
+            ]
     instructions += spo2_instructions
 
     instructions += evaluate_critical_spo2(vitals, tree_df, thresholds, phase)
@@ -382,15 +393,104 @@ def prompt_thresholds():
 
 def yn_dialog(title, prompt):
     root = tk.Tk(); root.withdraw()
-    result = None
-    while result not in ("Y", "N"):
-        result = simpledialog.askstring(title, f"{prompt} [Y/N]", parent=root)
-        if result is not None:
-            result = result.upper()
-        if result not in ("Y", "N"):
-            messagebox.showerror("入力エラー", "YかNを入力してください", parent=root)
-    root.destroy()
-    return result
+    try:
+        result = None
+        while result not in ("Y", "N"):
+            dialog = tk.Toplevel(root)
+            dialog.title(title)
+            dialog.transient(root)
+            dialog.grab_set()
+            dialog.resizable(False, False)
+
+            ttk.Label(dialog, text=prompt, wraplength=360, justify="left").grid(
+                row=0, column=0, columnspan=2, padx=16, pady=(16, 12)
+            )
+
+            selection = {"value": None}
+
+            def choose(value):
+                selection["value"] = value
+                dialog.destroy()
+
+            def on_key(event):
+                key = event.keysym.lower()
+                if key == "y":
+                    choose("Y")
+                elif key == "n":
+                    choose("N")
+
+            dialog.bind("<Key>", on_key)
+
+            yes_btn = ttk.Button(dialog, text="はい (Y)", command=lambda: choose("Y"))
+            yes_btn.grid(row=1, column=0, padx=(16, 8), pady=(0, 16), sticky="ew")
+            no_btn = ttk.Button(dialog, text="いいえ (N)", command=lambda: choose("N"))
+            no_btn.grid(row=1, column=1, padx=(8, 16), pady=(0, 16), sticky="ew")
+
+            dialog.columnconfigure(0, weight=1)
+            dialog.columnconfigure(1, weight=1)
+            yes_btn.focus_set()
+
+            root.wait_window(dialog)
+            result = selection["value"]
+            if result not in ("Y", "N"):
+                messagebox.showerror("入力エラー", "YかNを入力してください", parent=root)
+        return result
+    finally:
+        root.destroy()
+
+
+def _coerce_to_datetime(value):
+    """Best-effort conversion of ``value`` to :class:`datetime`.
+
+    Strings in common ``strftime`` formats, Unix timestamps, and already
+    materialised :class:`datetime.datetime` objects are supported.  Invalid or
+    empty inputs yield ``None`` which callers can treat as "unknown".
+    """
+
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        # Normalise common separators to leverage ``fromisoformat`` and
+        # ``strptime`` fallbacks when ``fromisoformat`` fails.
+        normalized = text.replace("/", "-")
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            pass
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M",
+            "%H:%M:%S",
+            "%H:%M",
+        ):
+            try:
+                return datetime.strptime(normalized, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def is_five_minute_timestamp(value) -> bool:
+    """Return ``True`` when ``value`` represents a five-minute mark.
+
+    Unparseable timestamps default to ``True`` so that existing behaviour is
+    preserved when the input format is unknown to the parser.
+    """
+
+    dt = _coerce_to_datetime(value)
+    if dt is None:
+        return True
+    return dt.minute % 5 == 0
 
 
 def update_threshold(thresholds, key, new_value):
@@ -401,6 +501,51 @@ def update_threshold(thresholds, key, new_value):
 def handle_spo2_check_n(vitals_memory):
     """Handle state updates when SPO2_CHECK receives an 'N' answer."""
     vitals_memory["SPO2_CHECK_PAUSE_UNTIL"] = time.time() + 60 * 60
+    vitals_memory["SPO2_CHECK_Y_COUNT"] = 0
+
+
+def handle_spo2_check_y(vitals_memory, vitals, thresholds):
+    """Increment the consecutive ``Y`` counter and update thresholds.
+
+    The function returns ``True`` when a threshold change was committed, which
+    allows callers to trigger a re-evaluation of the current vitals row.
+    """
+
+    count = vitals_memory.get("SPO2_CHECK_Y_COUNT", 0) + 1
+    vitals_memory["SPO2_CHECK_Y_COUNT"] = count
+
+    if count < 3:
+        return False
+
+    vitals_memory["SPO2_CHECK_Y_COUNT"] = 0
+
+    spo2_value = _normalize_optional_float(vitals.get("SpO2"))
+    lower = thresholds.get("SpO2_l")
+    upper = thresholds.get("SpO2_u")
+
+    target_key = None
+    prompt = None
+    if spo2_value is not None and lower is not None and spo2_value < lower:
+        target_key = "SpO2_l"
+        prompt = f"SpO2_l基準値を変更してください（現在値: {lower:.1f}）"
+    elif spo2_value is not None and upper is not None and spo2_value > upper:
+        target_key = "SpO2_u"
+        prompt = f"SpO2_u基準値を変更してください（現在値: {upper:.1f}）"
+
+    if not target_key:
+        return False
+
+    root = tk.Tk(); root.withdraw()
+    try:
+        new_val = simpledialog.askfloat("SpO2基準値変更", prompt, parent=root)
+    finally:
+        root.destroy()
+
+    if new_val is None:
+        return False
+
+    update_threshold(thresholds, target_key, new_val)
+    return True
 
 def handle_cvp_check_n(vitals_memory, vitals):
     """Handle state updates when CVP_UPPER_CHECK receives an 'N' answer."""
@@ -563,6 +708,7 @@ def main_loop(
         "FRO_CHECK": None,
         "CVP_CHECK_PAUSE_UNTIL": None,
         "SPO2_CHECK_PAUSE_UNTIL": None,
+        "SPO2_CHECK_Y_COUNT": 0,
         "CVP_OBS_COUNT": 0,
         "FRO_CVP_BASE": None,
         "FRO_DOSE_LOGGED": False,
@@ -767,8 +913,15 @@ def main_loop(
                     last_instruction_time[_id] = now
                     if answer == 'N':
                         handle_spo2_check_n(vitals_memory)
+                        vitals_memory['SPO2_CHECK_DONE'] = None
                         vitals['SPO2_CHECK_DONE'] = None
                         continue
+
+                    threshold_updated = handle_spo2_check_y(
+                        vitals_memory, vitals, thresholds
+                    )
+                    if threshold_updated:
+                        last_timestamp = None
 
                     vitals_memory['SPO2_CHECK_DONE'] = 'Y'
                     vitals['SPO2_CHECK_DONE'] = 'Y'

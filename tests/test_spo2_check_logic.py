@@ -246,6 +246,52 @@ def test_evaluate_all_requires_spo2_check_before_actions(monkeypatch):
     assert ids2 == ["SPO2_LOWER"]
 
 
+def test_spo2_check_only_on_five_minute_rows(monkeypatch):
+    vitals = {"SpO2": 70, "timestamp": "2023-09-01 12:04:00"}
+    thresholds = {"SpO2_l": 80, "SpO2_u": 100}
+    rows = [
+        {
+            "id": "SPO2_CHECK",
+            "phase(acute=a, reevaluate=r)": "a",
+            "condition": "vitals.get('SpO2') < SpO2_l",
+            "介入": "check",
+            "備考": "",
+            "ポーズ(min)": "",
+            "再評価用NextID": None,
+        },
+        {
+            "id": "SPO2_LOWER",
+            "phase(acute=a, reevaluate=r)": "a",
+            "condition": "vitals.get('SpO2') < SpO2_l",
+            "介入": "FiO2を10％上げる",
+            "備考": "",
+            "ポーズ(min)": "",
+            "再評価用NextID": None,
+        },
+    ]
+    tree_df = _df(rows)
+
+    for fname in [
+        "evaluate_cvp",
+        "evaluate_sbp",
+        "evaluate_critical_spo2",
+        "evaluate_adrenaline",
+        "evaluate_dobutamine",
+        "evaluate_bpup",
+        "evaluate_bpdown",
+        "evaluate_bleed",
+        "evaluate_transfusion",
+    ]:
+        monkeypatch.setattr(ms, fname, lambda *a, **k: [])
+
+    res = ms.evaluate_all(vitals, tree_df, thresholds)
+    assert [r["id"] for r in res] == ["OBSERVATION"]
+
+    vitals["timestamp"] = "2023-09-01 12:05:00"
+    res2 = ms.evaluate_all(vitals, tree_df, thresholds)
+    assert [r["id"] for r in res2] == ["SPO2_CHECK"]
+
+
 def test_spo2_resolve_requires_normal_value():
     thresholds = {"SpO2_l": 80, "SpO2_u": 100}
     rows = [
@@ -324,4 +370,35 @@ def test_spo2_lower_no20_triggers_only_when_low():
     vitals_no_trigger = {"SpO2": 85, "FiO2": 100, "NO": 20}
     res_no_trigger = evaluate_spo2(vitals_no_trigger, tree_df, thresholds, phase="r")
     assert res_no_trigger == []
+
+
+def test_spo2_check_y_updates_threshold(monkeypatch):
+    vitals_memory = {}
+    vitals = {"SpO2": 70}
+    thresholds = {"SpO2_l": 80, "SpO2_u": 100}
+
+    class DummyTk:
+        def withdraw(self):
+            return None
+
+        def destroy(self):
+            return None
+
+    monkeypatch.setattr(ms.tk, "Tk", lambda: DummyTk())
+    monkeypatch.setattr(ms.simpledialog, "askfloat", lambda *a, **k: 75.0)
+
+    assert ms.handle_spo2_check_y(vitals_memory, vitals, thresholds) is False
+    assert vitals_memory["SPO2_CHECK_Y_COUNT"] == 1
+    assert ms.handle_spo2_check_y(vitals_memory, vitals, thresholds) is False
+    assert vitals_memory["SPO2_CHECK_Y_COUNT"] == 2
+    assert ms.handle_spo2_check_y(vitals_memory, vitals, thresholds) is True
+    assert thresholds["SpO2_l"] == 75.0
+    assert vitals_memory["SPO2_CHECK_Y_COUNT"] == 0
+
+
+def test_spo2_check_n_resets_y_count(monkeypatch):
+    vitals_memory = {"SPO2_CHECK_Y_COUNT": 2}
+    monkeypatch.setattr(ms.time, "time", lambda: 100)
+    ms.handle_spo2_check_n(vitals_memory)
+    assert vitals_memory["SPO2_CHECK_Y_COUNT"] == 0
 
