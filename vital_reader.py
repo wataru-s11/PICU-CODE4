@@ -134,6 +134,11 @@ CVP_COORDS = (0, 0, 0, 0)
 vital_crop: dict[str, tuple[int, int, int, int]] = {}
 SPONT_BREATH_COORDS: list[tuple[int, int, int, int]] = []
 
+# Lazy-loaded resources for spontaneous breath detection
+spont_breath_model = None
+spont_breath_meta = None
+spont_breath_transform = None
+
 
 def crop_image(img, coord):
     """Safely crop ``img`` according to ``coord``.
@@ -651,6 +656,17 @@ VITAL_COLUMNS = [
     "tBil", "HCO3", "BE", "Alb"
 ]
 
+# ``save_vitals_to_csv`` only iterates through ``ALL_COLUMNS`` when constructing
+# a row, therefore the list excludes ``timestamp`` which is handled
+# separately.  Extra keys (e.g. drug doses, ventilator mode) are added later so
+# they do not need to appear here.
+ALL_COLUMNS = [c for c in VITAL_COLUMNS if c != "timestamp"]
+
+# Columns such as bolus drug doses should not be forward-filled when appending
+# new vital rows.  The set can be extended by other modules (see
+# :mod:`main_surgery`).
+NON_PERSISTENT_COLUMNS = {"furosemide_mg"}
+
 def create_empty_vitals_csv(path):
     if not os.path.exists(path):
         import pandas as pd
@@ -809,6 +825,87 @@ def detect_spontaneous_breath(img, coords_list):
         if bright >= 0.4 * w:
             return True
     return False
+
+
+_ROI_READER_OVERRIDES = {
+    "Tskin": read_temp_roi,
+    "Trect": read_temp_roi,
+    "I_E": read_ie_roi,
+    "VentMode": read_mode_roi,
+}
+
+
+def _ensure_image(image_or_path):
+    if np is not None and isinstance(image_or_path, np.ndarray):
+        return image_or_path
+
+    if isinstance(image_or_path, (list, tuple)):
+        return image_or_path
+
+    path = Path(image_or_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"画像ファイルが見つかりません: {image_or_path}")
+
+    if cv2 is None:
+        raise RuntimeError("OpenCVが利用できないため画像を読み込めません。")
+
+    img = cv2.imread(str(path))
+    if img is None:
+        raise ValueError(f"画像を読み込めませんでした: {image_or_path}")
+    return img
+
+
+def ocr_vitals_from_image(image_or_path):
+    """Extract vital signs from ``image_or_path`` using OCR.
+
+    The function expects the global ROI definitions (``vital_crop``,
+    ``BP_COMBINED_COORD`` etc.) to be populated beforehand via
+    :func:`select_display_and_bed`.  When EasyOCR or other heavy dependencies
+    are unavailable the function still returns a dictionary with the expected
+    keys, defaulting to empty strings.
+    """
+
+    if cv2 is None:
+        raise RuntimeError("OpenCVが利用できないため画像のOCRが実行できません。")
+
+    img = _ensure_image(image_or_path)
+
+    results: dict[str, str] = {}
+
+    if BP_COMBINED_COORD and BP_COMBINED_COORD[2] > 0 and BP_COMBINED_COORD[3] > 0:
+        bp_roi = crop_image(img, BP_COMBINED_COORD)
+        bp_text, sbp, dbp, map_val = read_bp_roi(bp_roi)
+        if bp_text:
+            results["BP"] = bp_text
+        results["SBP"] = sbp
+        results["DBP"] = dbp
+        results["MAP"] = map_val
+
+    for name, coord in vital_crop.items():
+        if not coord or coord[2] <= 0 or coord[3] <= 0:
+            continue
+        roi = crop_image(img, coord)
+        reader = _ROI_READER_OVERRIDES.get(name)
+        if reader is not None:
+            value = reader(roi)
+        else:
+            value = read_num_roi(roi, allow_dot=True)
+        results[name] = value
+
+    if CVP_COORDS and CVP_COORDS[2] > 0 and CVP_COORDS[3] > 0:
+        cvp_roi = crop_image(img, CVP_COORDS)
+        results["CVP"] = read_cvp_roi(cvp_roi)
+
+    apply_pressure_support_split(results)
+
+    if SPONT_BREATH_COORDS:
+        spont = detect_spontaneous_breath(img, SPONT_BREATH_COORDS)
+        results["SpontaneousBreath"] = "1" if spont else "0"
+
+    for key in ALL_COLUMNS:
+        results.setdefault(key, "")
+
+    return results
 
 
 def save_vitals_to_csv(vitals_dict, csv_path):
