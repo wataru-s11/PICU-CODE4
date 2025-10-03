@@ -8,14 +8,16 @@ try:
     from mss import mss
 except ImportError as exc:  # pragma: no cover - defensive branch
     raise SystemExit(
-        "Missing optional dependency 'mss'. Install it with 'pip install mss'."
+        "Missing optional dependency 'mss'. Install it with 'pip install mss' "
+        "(or 'py -m pip install mss' on Windows)."
     ) from exc
 
 try:
     from PIL import Image
 except ImportError as exc:  # pragma: no cover - defensive branch
     raise SystemExit(
-        "Missing optional dependency 'Pillow'. Install it with 'pip install pillow'."
+        "Missing optional dependency 'Pillow'. Install it with 'pip install pillow' "
+        "(or 'py -m pip install pillow' on Windows)."
     ) from exc
 import time
 import os
