@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 import json
 from typing import List, Optional
+import socket
 
 
 # =========================
@@ -61,6 +62,10 @@ parser.add_argument("--top", type=int, help="Top coordinate for manual capture")
 parser.add_argument("--width", type=int, help="Width of capture region")
 parser.add_argument("--height", type=int, help="Height of capture region")
 parser.add_argument("--interval", type=int, default=60, help="Capture interval in seconds")
+parser.add_argument(
+    "--name-prefix",
+    help="Prefix for saved image files. Defaults to host name when omitted.",
+)
 args = parser.parse_args()
 
 config = load_config(args.config)
@@ -72,6 +77,14 @@ base_dir = resolve_path(
     DEFAULT_IMAGE_BASE_CANDIDATES,
 )
 base_dir.mkdir(parents=True, exist_ok=True)
+
+name_prefix = (
+    args.name_prefix
+    or os.getenv("IMAGE_NAME_PREFIX")
+    or config.get("IMAGE_NAME_PREFIX")
+    or socket.gethostname()
+)
+name_prefix = name_prefix.replace(" ", "_") if name_prefix else "capture"
 
 try:
     with mss() as sct:
@@ -124,8 +137,8 @@ try:
         while True:
             date_dir = base_dir / datetime.now().strftime("%Y%m%d")
             date_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%H%M%S")
-            filepath = date_dir / f"{timestamp}.png"
+            timestamp = datetime.now().strftime("%H%M%S_%f")
+            filepath = date_dir / f"{name_prefix}_{timestamp}.png"
 
             # スクリーンショット取得・保存
             screenshot = sct.grab(monitor)
