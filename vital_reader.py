@@ -432,6 +432,19 @@ def sanitize_numeric_text(text: str, allow_dot: bool = False, allow_sign: bool =
     normalized = sanitize_ocr_text(text)
     if not normalized:
         return ""
+    if allow_dot:
+        # Some OCR outputs use middle dots or Japanese "点" characters to
+        # represent decimal points.  Converting these variants to the ASCII
+        # dot keeps decimal numbers intact while leaving integer-only
+        # sanitisation unaffected.
+        decimal_variants = {
+            "・",
+            "･",
+            "·",
+            "点",
+        }
+        for variant in decimal_variants:
+            normalized = normalized.replace(variant, ".")
     allowed = "0123456789"
     if allow_dot:
         allowed += "."
