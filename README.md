@@ -10,6 +10,16 @@ Install the optional screen-capture dependencies before running `auto_capture.py
 pip install mss pillow
 ```
 
+Install the OCR dependencies before running `vital_reader.py`:
+
+```bash
+pip install easyocr opencv-python
+```
+
+EasyOCR may also download PyTorch the first time it runs. GPU acceleration is
+optional; the script will fall back to CPU-based OCR when PyTorch is not
+available.
+
 On Windows you can use:
 
 ```powershell
