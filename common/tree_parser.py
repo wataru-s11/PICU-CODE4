@@ -7,6 +7,15 @@ try:
 except Exception:  # pragma: no cover
     yaml = None
 
+if yaml is None:  # pragma: no cover - exercised when PyYAML is missing
+    # ``tree.yaml`` is distributed with the project and only relies on a
+    # conservative subset of YAML.  When PyYAML is unavailable (e.g. in a
+    # bare Python installation), fall back to a small, self-contained
+    # parser that understands the constructs used by the file.  The
+    # implementation lives in ``common.simple_yaml`` so we import it lazily
+    # to avoid an unnecessary dependency when PyYAML is present.
+    from . import simple_yaml as yaml
+
 
 def _parse_condition(cond: str, item: str) -> str:
     """Convert a small DSL used in tree.yaml into a Python expression."""
