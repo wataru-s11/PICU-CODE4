@@ -163,7 +163,12 @@ class FluidPanel(tk.Frame):
     def _append_to_csv(self, hour_key: str, rec: Dict[str, float]) -> None:
         if not self.csv_path:
             return
-        row = {"timestamp": f"{hour_key}:00"}
+        # ``_read_csv`` expects the time column to be named ``hour``.
+        # A recent refactor mistakenly wrote ``timestamp`` here which meant
+        # previously saved CSVs no longer loaded because the column name did
+        # not match.  Restoring the original header keeps import/export
+        # compatible with older files.
+        row = {"hour": hour_key}
         row.update(rec)
         try:
             if self.csv_path.exists():
