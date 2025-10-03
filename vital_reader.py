@@ -961,7 +961,15 @@ def save_vitals_to_csv(vitals_dict, csv_path):
                 writer.writerow(row)
             os.replace(tmp_path, csv_path)
         else:
-            fieldnames = ["timestamp"] + ALL_COLUMNS
+            # ``row`` may contain dynamically discovered keys (for example
+            # SpontaneousBreath or drug doses).  When the CSV does not yet
+            # exist we must include those columns up front; otherwise
+            # ``DictWriter`` would raise ``ValueError: dict contains fields not
+            # in fieldnames`` and the vitals would be dropped silently.  The
+            # ``dict.fromkeys`` trick preserves order while removing duplicates.
+            fieldnames = list(
+                dict.fromkeys(["timestamp"] + ALL_COLUMNS + list(row.keys()))
+            )
             with open(tmp_path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
