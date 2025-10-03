@@ -44,10 +44,29 @@ except Exception:  # pragma: no cover
     messagebox = None  # type: ignore
     simpledialog = None  # type: ignore
 
-if easyocr:
-    easyocr_reader = easyocr.Reader(['en', 'ja'], gpu=torch.cuda.is_available(), verbose=False)
-else:  # pragma: no cover - easyocr not available
-    easyocr_reader = None
+def _create_easyocr_reader(easyocr_module, torch_module):
+    """Create an :class:`easyocr.Reader` instance when dependencies allow."""
+
+    if easyocr_module is None:
+        return None
+
+    use_gpu = False
+    if torch_module is not None:
+        cuda = getattr(torch_module, "cuda", None)
+        is_available = getattr(cuda, "is_available", None)
+        if callable(is_available):
+            try:
+                use_gpu = bool(is_available())
+            except Exception:  # pragma: no cover - safety net for odd envs
+                use_gpu = False
+
+    try:
+        return easyocr_module.Reader(['en', 'ja'], gpu=use_gpu, verbose=False)
+    except Exception:  # pragma: no cover - optional dependency
+        return None
+
+
+easyocr_reader = _create_easyocr_reader(easyocr, torch)
 
 from bed_coords import BED_COORDS_8
 from bed_coords_4 import BED_COORDS_4
