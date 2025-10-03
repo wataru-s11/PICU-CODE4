@@ -2,6 +2,20 @@
 
 This project contains scripts for evaluating patient vitals during surgery.
 
+## Installation
+
+Install the optional screen-capture dependencies before running `auto_capture.py`:
+
+```bash
+pip install mss pillow
+```
+
+On Windows you can use:
+
+```powershell
+py -m pip install mss pillow
+```
+
 ## Configuration
 
 Paths used by `main_surgery.py` and `vital_reader.py` can be configured with environment variables, command line options, or a `config.json` file placed in the project root.
