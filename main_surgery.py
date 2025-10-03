@@ -351,7 +351,11 @@ def get_latest_vitals(path: Union[Path, str]):
         if path.suffix.lower() in (".xls", ".xlsx"):
             df = pd.read_excel(path)
         else:
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, encoding="utf-8-sig")
+        # Remove a potential UTF-8 BOM from column names so that the expected
+        # ``timestamp`` column is accessible even when the CSV was produced by
+        # :func:`vital_reader.save_vitals_to_csv` (which writes ``utf-8-sig``).
+        df.columns = [str(col).lstrip("\ufeff") for col in df.columns]
         if df.empty:
             return None
         # Forward-fill missing values so that failed OCR or partial updates
