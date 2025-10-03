@@ -15,3 +15,7 @@ def test_normalize_ie_ratio_handles_full_width_characters():
 
 def test_normalize_ie_ratio_handles_alternate_separators_and_leading_zeros():
     assert normalize_ie_text("01/02.0") == "1:2"
+
+
+def test_normalize_ie_ratio_preserves_fractional_part_with_middle_dot():
+    assert normalize_ie_text("1：2・5") == "1:2.5"

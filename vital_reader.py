@@ -197,16 +197,29 @@ def sanitize_ocr_text(text: str) -> str:
     return re.sub(r"\s+", "", normalized)
 
 
+def _replace_chars(text: str, replacements: dict[str, str]) -> str:
+    for src, dest in replacements.items():
+        text = text.replace(src, dest)
+    return text
+
+
 def normalize_ie_text(text: str) -> str:
     normalized = sanitize_ocr_text(text)
     if not normalized:
         return ""
 
-    normalized = normalized.replace("\uFF1A", ":")
-    normalized = normalized.replace("/", ":")
-    normalized = normalized.replace("．", ".")
-    normalized = normalized.replace("。", ".")
-    normalized = normalized.replace(",", ".")
+    normalized = _replace_chars(normalized, {
+        "\uFF1A": ":",
+        "/": ":",
+    })
+    normalized = _replace_chars(normalized, {
+        "．": ".",
+        "。": ".",
+        ",": ".",
+        "・": ".",
+        "･": ".",
+        "·": ".",
+    })
     normalized = re.sub(r"[^0-9:.]", "", normalized)
     normalized = re.sub(r":+", ":", normalized)
 
