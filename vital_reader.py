@@ -55,6 +55,12 @@ if easyocr:
 else:  # pragma: no cover - easyocr not available
     easyocr_reader = None
 
+if easyocr_reader is None:  # pragma: no cover - optional dependency warning
+    print(
+        "[WARN] EasyOCR (easyocr) が利用できません。'pip install easyocr' でインストール"
+        " するまで OCR 機能は動作しません。"
+    )
+
 from bed_coords import BED_COORDS_8
 from bed_coords_4 import BED_COORDS_4
 
@@ -853,7 +859,12 @@ def _ensure_image(image_or_path):
         raise FileNotFoundError(f"画像ファイルが見つかりません: {image_or_path}")
 
     if cv2 is None:
-        raise RuntimeError("OpenCVが利用できないため画像を読み込めません。")
+        message = (
+            "[ERROR] OpenCV (cv2) が利用できないため画像を読み込めません。"
+            " 'pip install opencv-python' を実行してから再度お試しください。"
+        )
+        print(message)
+        raise RuntimeError(message)
 
     img = cv2.imread(str(path))
     if img is None:
@@ -872,7 +883,12 @@ def ocr_vitals_from_image(image_or_path):
     """
 
     if cv2 is None:
-        raise RuntimeError("OpenCVが利用できないため画像のOCRが実行できません。")
+        message = (
+            "[ERROR] OpenCV (cv2) が利用できないため画像のOCRを実行できません。"
+            " 'pip install opencv-python' を実行してから再度お試しください。"
+        )
+        print(message)
+        raise RuntimeError(message)
 
     img = _ensure_image(image_or_path)
 
@@ -1086,6 +1102,20 @@ if __name__ == "__main__":
             chosen = pick_today_or_latest(image_folder)
             print(f"画像フォルダ自動選択: {chosen}")
             image_folder = chosen
+
+    if cv2 is None:
+        print(
+            "[ERROR] OpenCV (cv2) がインストールされていないため自動OCRを開始できません。"
+            " 'pip install opencv-python' を実行してください。"
+        )
+        sys.exit(1)
+
+    if easyocr_reader is None:
+        print(
+            "[ERROR] EasyOCR がインストールされていないため自動OCRを開始できません。"
+            " 'pip install easyocr' を実行してから再度お試しください。"
+        )
+        sys.exit(1)
 
     print("自動OCR＆CSV保存ループを開始します（Ctrl+Cで停止）")
     try:
