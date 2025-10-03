@@ -474,6 +474,42 @@ def read_num_roi(roi, allow_dot: bool = False, allow_sign: bool = False):
     return sanitize_numeric_text(text, allow_dot=allow_dot, allow_sign=allow_sign)
 
 
+def _enhance_blue_numeric_roi(roi):
+    """Apply contrast enhancement tailored for light-blue numeric readouts."""
+
+    if cv2 is None or np is None or not isinstance(roi, np.ndarray):
+        return roi
+
+    if roi.size == 0:
+        return roi
+
+    try:
+        if roi.dtype != np.uint8:
+            roi_uint8 = cv2.normalize(roi, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        else:
+            roi_uint8 = roi
+
+        hsv = cv2.cvtColor(roi_uint8, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv)
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        v_eq = clahe.apply(v)
+        v_norm = cv2.normalize(v_eq, None, 0, 255, cv2.NORM_MINMAX)
+        v_blur = cv2.GaussianBlur(v_norm, (3, 3), 0)
+
+        hsv_enhanced = cv2.merge((h, s, v_blur))
+        enhanced = cv2.cvtColor(hsv_enhanced, cv2.COLOR_HSV2BGR)
+        return enhanced
+    except Exception:
+        return roi
+
+
+def read_vte_roi(roi):
+    processed = _enhance_blue_numeric_roi(roi)
+    text, _ = read_easy(processed, allow_dot=True)
+    return sanitize_numeric_text(text, allow_dot=True)
+
+
 def read_temp_roi(roi):
     return read_num_roi(roi, allow_dot=True, allow_sign=True)
 
@@ -869,6 +905,7 @@ _ROI_READER_OVERRIDES = {
     "Tskin": read_temp_roi,
     "Trect": read_temp_roi,
     "I_E": read_ie_roi,
+    "VTe": read_vte_roi,
     "VentMode": read_mode_roi,
 }
 
