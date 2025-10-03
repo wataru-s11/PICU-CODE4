@@ -342,6 +342,17 @@ def compute_cvp_follow_instructions(
 
 # ---------------- データ取得 ----------------
 
+def _to_python_scalar(value):
+    """Return ``value`` converted to a built-in Python scalar when possible."""
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
+
+
 def get_latest_vitals(path: Union[Path, str]):
     if pd is None:
         print("[!] pandas が利用できないため CSV を読み込めません")
@@ -369,7 +380,10 @@ def get_latest_vitals(path: Union[Path, str]):
         if fill_columns:
             df.loc[:, fill_columns] = df.loc[:, fill_columns].ffill()
         last_row = df.iloc[-1]
-        return {k: (None if pd.isna(v) else v) for k, v in last_row.items()}
+        return {
+            k: (None if pd.isna(v) else _to_python_scalar(v))
+            for k, v in last_row.items()
+        }
     except Exception as e:
         print(f"[!] 読み込みエラー: {e}")
         return None

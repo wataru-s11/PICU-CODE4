@@ -57,3 +57,19 @@ def test_get_latest_vitals_handles_utf8_bom(tmp_path):
 
     assert latest["timestamp"] == "2025-08-23 15:55:00"
     assert latest["SBP"] == 125
+
+
+def test_get_latest_vitals_returns_python_scalars(tmp_path):
+    df = pd.DataFrame(
+        [
+            {"timestamp": "2025-08-23 15:55:00", "SBP": 125.0, "HR": 88},
+        ]
+    )
+    path = tmp_path / "vitals.csv"
+    df.to_csv(path, index=False)
+
+    latest = get_latest_vitals(path)
+
+    assert type(latest["SBP"]) is float
+    assert type(latest["HR"]) is int
+    assert "np.float" not in repr(latest)
