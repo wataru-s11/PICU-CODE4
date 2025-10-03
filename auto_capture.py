@@ -1,5 +1,22 @@
-from mss import mss
-from PIL import Image
+# NOTE:
+#   The script is frequently executed on machines that may not have all
+#   dependencies pre-installed (e.g. when run manually via ``py
+#   auto_capture.py``).  Previously this resulted in a rather cryptic
+#   ``ModuleNotFoundError`` for ``mss``.  To improve the UX we eagerly
+#   validate the imports and provide actionable installation guidance.
+try:
+    from mss import mss
+except ImportError as exc:  # pragma: no cover - defensive branch
+    raise SystemExit(
+        "Missing optional dependency 'mss'. Install it with 'pip install mss'."
+    ) from exc
+
+try:
+    from PIL import Image
+except ImportError as exc:  # pragma: no cover - defensive branch
+    raise SystemExit(
+        "Missing optional dependency 'Pillow'. Install it with 'pip install pillow'."
+    ) from exc
 import time
 import os
 from datetime import datetime
