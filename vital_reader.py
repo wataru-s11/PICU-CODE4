@@ -45,7 +45,13 @@ except Exception:  # pragma: no cover
     simpledialog = None  # type: ignore
 
 if easyocr:
-    easyocr_reader = easyocr.Reader(['en', 'ja'], gpu=torch.cuda.is_available(), verbose=False)
+    # ``easyocr.Reader`` enables GPU acceleration when ``gpu=True``.  Some
+    # environments install ``easyocr`` without installing PyTorch, which caused
+    # the previous code to raise an :class:`AttributeError` when evaluating
+    # ``torch.cuda.is_available()`` because ``torch`` was ``None``.  Falling back
+    # to CPU OCR keeps the feature working even when PyTorch is unavailable.
+    use_gpu = torch.cuda.is_available() if torch is not None else False
+    easyocr_reader = easyocr.Reader(['en', 'ja'], gpu=use_gpu, verbose=False)
 else:  # pragma: no cover - easyocr not available
     easyocr_reader = None
 
