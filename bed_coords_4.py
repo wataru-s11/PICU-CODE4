@@ -38,6 +38,9 @@ def _build_bed(dy):
     return {
         "BP_COMBINED_COORD": b["BP"],
         "CVP_COORDS": b["CVP"],
+        "SPONT_BREATH_COORDS": [
+            (112, 239 + dy, 537, 51),
+        ],
         "vital_crop": {
             "HR": b["HR"],
             "SpO2": b["SpO2"],

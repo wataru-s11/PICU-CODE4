@@ -6,7 +6,7 @@ from pathlib import Path
 import argparse
 import json
 import sys
-from typing import Optional
+from typing import Optional, Any
 from decimal import Decimal, InvalidOperation
 try:  # pragma: no cover - optional dependency
     import numpy as np  # type: ignore
@@ -633,12 +633,70 @@ DEFAULT_VITALS_BASE_CANDIDATES = [
     r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\vitals",
 ]
 DEFAULT_SPONT_BREATH_MODEL_CANDIDATES = [
-    str(Path(__file__).with_name("spont_breath_model.keras")),
-    r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\spon\\models\\white_line_cls.pt",
+    r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\spon_4monitor_flow\\runs_flow\\best_model.pth",
 ]
 DEFAULT_SPONT_BREATH_META_CANDIDATES = [
-    r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\spon\\models\\white_line_cls.meta.json",
+    r"C:\\Users\\sakai\\OneDrive\\Desktop\\BOT\\spon_4monitor_flow\\runs_flow\\summary.json",
 ]
+
+
+def _meta_get(meta: dict[str, Any], keys: list[str], default: Any = None) -> Any:
+    """Return the first non-null value found in ``meta`` for any ``keys``."""
+
+    if not meta:
+        return default
+
+    for key in keys:
+        value = meta.get(key)
+        if value not in (None, ""):
+            return value
+
+    # Common nested containers such as ``{"model": {...}}``
+    for container in ("model", "config", "params", "hyperparams"):
+        sub = meta.get(container)
+        if isinstance(sub, dict):
+            for key in keys:
+                value = sub.get(key)
+                if value not in (None, ""):
+                    return value
+
+    return default
+
+
+def _meta_image_hw(meta: dict[str, Any], default_h: int = 128, default_w: int = 512) -> tuple[int, int]:
+    """Extract image height/width from ``meta`` with generous fallbacks."""
+
+    def _as_int(value: Any) -> Optional[int]:
+        try:
+            iv = int(value)
+            return iv if iv > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    h = _as_int(_meta_get(meta, ["img_h", "img_height", "height", "input_height", "image_height"]))
+    w = _as_int(_meta_get(meta, ["img_w", "img_width", "width", "input_width", "image_width"]))
+
+    size = _meta_get(meta, ["img_size", "input_size", "input_shape", "image_size"])
+    if isinstance(size, (list, tuple)):
+        vals = list(size)
+        if len(vals) >= 4:
+            h = h or _as_int(vals[-2])
+            w = w or _as_int(vals[-1])
+        elif len(vals) == 3:
+            h = h or _as_int(vals[-2])
+            w = w or _as_int(vals[-1])
+        elif len(vals) >= 2:
+            h = h or _as_int(vals[0])
+            w = w or _as_int(vals[1])
+    elif isinstance(size, dict):
+        h = h or _as_int(_meta_get(size, ["img_h", "img_height", "height", "h"]))
+        w = w or _as_int(_meta_get(size, ["img_w", "img_width", "width", "w"]))
+
+    if h is None:
+        h = default_h
+    if w is None:
+        w = default_w
+    return h, w
 
 # =========================
 # リソース初期化
@@ -668,14 +726,19 @@ def init_resources(
         return
 
     try:
-        meta: dict[str, object] = {}
+        meta: dict[str, Any] = {}
         if spont_breath_meta_path and Path(spont_breath_meta_path).is_file():
             with open(spont_breath_meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
-        backbone = str(meta.get("backbone", "mobilenet_v3_small")) if meta else "mobilenet_v3_small"
-        img_h = int(meta.get("img_h", 128)) if meta else 128
-        img_w = int(meta.get("img_w", 512)) if meta else 512
+        backbone = str(
+            _meta_get(
+                meta,
+                ["backbone", "model", "model_name", "architecture"],
+                "mobilenet_v3_small",
+            )
+        )
+        img_h, img_w = _meta_image_hw(meta)
 
         model, transform = build_spont_breath_model(backbone, img_h, img_w)
         state = torch.load(str(spont_breath_model_path), map_location="cpu")
@@ -858,7 +921,21 @@ def detect_spontaneous_breath(img, coords_list):
     )
 
     if use_cnn:
-        thr = float(spont_breath_meta.get("threshold", 0.5)) if spont_breath_meta else 0.5
+        thr = 0.5
+        if spont_breath_meta:
+            thr = float(
+                _meta_get(
+                    spont_breath_meta,
+                    [
+                        "threshold",
+                        "score_thr",
+                        "score_threshold",
+                        "prob_threshold",
+                        "confidence_threshold",
+                    ],
+                    0.5,
+                )
+            )
         for x, y, w, h in coords_list:
             crop = img[y:y + h, x:x + w]
             if crop.size == 0:
