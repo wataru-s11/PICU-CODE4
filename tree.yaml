@@ -473,9 +473,9 @@ rules:
   - CONT
   actions:
   - NEXT:なし
-- id: BPDOWN_A_CVP_HIGH_ADRENALINE_LOW
-  when: vitals.get("CVP") > {{CVP_u}} and vitals.get("adrenaline", 0) < 0.1
-  message: コメント: CVP高値かつアドレナリン低用量です。アドレナリンを増量してください
+  - id: BPDOWN_A_CVP_HIGH_ADRENALINE_LOW
+    when: vitals.get("CVP") > {{CVP_u}} and vitals.get("adrenaline", 0) < 0.1
+    message: "コメント: CVP高値かつアドレナリン低用量です。アドレナリンを増量してください"
   severity: info
   tags:
   - a
@@ -483,9 +483,9 @@ rules:
   - adrenaline
   actions:
   - NEXT:なし
-- id: BPDOWN_A_CVP_HIGH_ESCALATE
-  when: vitals.get("CVP") > {{CVP_u}} and vitals.get("adrenaline", 0) <= 0.1
-  message: コメント: CVP高値です。上級医コール、開胸またはECMOの準備をしてください
+  - id: BPDOWN_A_CVP_HIGH_ESCALATE
+    when: vitals.get("CVP") > {{CVP_u}} and vitals.get("adrenaline", 0) <= 0.1
+    message: "コメント: CVP高値です。上級医コール、開胸またはECMOの準備をしてください"
   severity: info
   tags:
   - a
@@ -493,9 +493,9 @@ rules:
   - CALL
   actions:
   - NEXT:なし
-- id: BPDOWN_A_CVP_NORMAL_ADRENALINE_LOW
-  when: vitals.get("CVP", 0) <= {{CVP_u}} and vitals.get("adrenaline", 0) < 0.1
-  message: コメント: アドレナリンを増量すると血圧が上昇する可能性があります
+  - id: BPDOWN_A_CVP_NORMAL_ADRENALINE_LOW
+    when: vitals.get("CVP", 0) <= {{CVP_u}} and vitals.get("adrenaline", 0) < 0.1
+    message: "コメント: アドレナリンを増量すると血圧が上昇する可能性があります"
   severity: info
   tags:
   - a
@@ -503,9 +503,9 @@ rules:
   - adrenaline
   actions:
   - NEXT:なし
-- id: BPDOWN_A_CVP_NORMAL_ESCALATE
-  when: vitals.get("CVP", 0) <= {{CVP_u}} and vitals.get("adrenaline", 0) <= 0.1
-  message: コメント: 上級医コールを検討してください
+  - id: BPDOWN_A_CVP_NORMAL_ESCALATE
+    when: vitals.get("CVP", 0) <= {{CVP_u}} and vitals.get("adrenaline", 0) <= 0.1
+    message: "コメント: 上級医コールを検討してください"
   severity: info
   tags:
   - a
