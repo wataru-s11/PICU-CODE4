@@ -519,6 +519,32 @@ def read_ie_roi(roi):
     return normalize_ie_text(text)
 
 
+def _enhance_mode_roi(roi):
+    if cv2 is None or np is None:
+        return roi
+    try:
+        if isinstance(roi, np.ndarray):
+            img = roi
+        else:
+            img = np.array(roi)
+        if img is None or img.size == 0:
+            return roi
+        if img.ndim == 2:
+            gray = img
+        else:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        blurred = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=1.0)
+        sharpened = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
+
+        return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+    except Exception:
+        return roi
+
+
 def normalize_vent_mode_label(label: str) -> str:
     if not label:
         return ""
@@ -569,7 +595,8 @@ def apply_pressure_support_split(results):
 
 
 def read_mode_roi(roi):
-    text, _ = read_easy(roi, allow_dot=False)
+    processed = _enhance_mode_roi(roi)
+    text, _ = read_easy(processed, allow_dot=False)
     return normalize_vent_mode_label(text)
 
 
