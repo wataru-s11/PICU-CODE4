@@ -8,7 +8,8 @@ from typing import MutableMapping
 
 SURGERY_OPTIONS = [
     "根治術",
-    "姑息術",
+    "姑息術（シャント）",
+    "姑息術（バンド）",
     "Glenn",
     "Fontan(フェネストレーションあり)",
 ]

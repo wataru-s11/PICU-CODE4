@@ -80,23 +80,22 @@ THRESHOLDS: MutableMapping[str, float] = {}
 SURGERY_STATE: MutableMapping[str, str] = {"type": "根治術"}
 
 # Mapping of surgery-specific SpO2 actions
+_RADICAL_SPO2 = {
+    "upper": "SpO2_uより大きいSpO2の場合FiO2を下げるまたNOを減量してもよいです",
+    "lower": "SpO2_lより小さいSpO2の場合FiO2をあげるまたNOを増量してもよいです",
+}
+
+_PALLIATIVE_SPO2 = {
+    "upper": "SpO2_uより大きいSpO2の場合FiO2を下げるまたNOを減量してください",
+    "lower": "SpO2_lより小さいSpO2の場合FiO2をあげるまたNOを増量してください",
+}
+
 SPO2_ACTIONS: Dict[str, Dict[str, str]] = {
-    "根治術": {
-        "upper": "SpO2_uより大きいSpO2の場合FiO2を下げるまたNOを減量してもよいです",
-        "lower": "SpO2_lより小さいSpO2の場合FiO2をあげるまたNOを増量してもよいです",
-    },
-    "姑息術": {
-        "upper": "SpO2_uより大きいSpO2の場合FiO2を下げるまたNOを減量してください",
-        "lower": "SpO2_lより小さいSpO2の場合FiO2をあげるまたNOを増量してください",
-    },
-    "Glenn": {
-        "upper": "SpO2_uより大きいSpO2の場合FiO2を下げるまたNOを減量してもよいです",
-        "lower": "SpO2_lより小さいSpO2の場合FiO2をあげるまたNOを増量してもよいです",
-    },
-    "Fontan(フェネストレーションあり)": {
-        "upper": "SpO2_uより大きいSpO2の場合FiO2を下げるまたNOを減量してもよいです",
-        "lower": "SpO2_lより小さいSpO2の場合FiO2をあげるまたNOを増量してもよいです",
-    },
+    "根治術": _RADICAL_SPO2,
+    "姑息術（シャント）": _PALLIATIVE_SPO2,
+    "姑息術（バンド）": _PALLIATIVE_SPO2,
+    "Glenn": _RADICAL_SPO2,
+    "Fontan(フェネストレーションあり)": _RADICAL_SPO2,
 }
 
 # 既定の親フォルダ候補（vital_reader と揃える）
@@ -213,25 +212,91 @@ def fmt_comment(cmt):
     return c if c else ""
 
 
-def adjust_spo2_actions(instructions, surgery_type: str):
-    """Modify SpO2 related instructions based on selected surgery type."""
-    mapping = SPO2_ACTIONS.get(surgery_type)
-    if not mapping:
+def _maybe_add_shunt_low_flow(instructions, surgery_type, vitals, thresholds):
+    """Inject additional guidance for shunt palliative surgery when SBP and SpO2 drop."""
+
+    if surgery_type != "姑息術（シャント）":
         return instructions
-    adjusted = []
-    for inst in instructions:
-        _id = inst.get("id", "")
-        if _id.startswith("SPO2_UPPER") and "resolve" not in _id:
-            new_inst = dict(inst)
-            new_inst["instruction"] = mapping["upper"]
-            adjusted.append(new_inst)
-        elif _id.startswith("SPO2_LOWER") and "resolve" not in _id:
-            new_inst = dict(inst)
-            new_inst["instruction"] = mapping["lower"]
-            adjusted.append(new_inst)
-        else:
-            adjusted.append(inst)
-    return adjusted
+    if not vitals or not thresholds:
+        return instructions
+
+    sbp = _normalize_optional_float(vitals.get("SBP"))
+    sbp_l = _normalize_optional_float(thresholds.get("SBP_l"))
+    spo2 = _normalize_optional_float(vitals.get("SpO2"))
+    spo2_u = _normalize_optional_float(thresholds.get("SpO2_u"))
+    if None in (sbp, sbp_l, spo2, spo2_u):
+        return instructions
+    if not (sbp < sbp_l and spo2 < spo2_u):
+        return instructions
+
+    result = list(instructions)
+    existing_ids = {inst.get("id") for inst in result}
+
+    if "SHUNT_LOW_FLOW_ALERT" not in existing_ids:
+        result.append(
+            {
+                "id": "SHUNT_LOW_FLOW_ALERT",
+                "instruction": "SBP低下とSpO2低下からシャント血流低下の可能性があります。",
+            }
+        )
+        existing_ids.add("SHUNT_LOW_FLOW_ALERT")
+
+    pit = _normalize_optional_float(vitals.get("pitressin"))
+    if pit is None:
+        for key in ("vasopressin", "Vasopressin", "PITRESSIN"):
+            pit = _normalize_optional_float(vitals.get(key))
+            if pit is not None:
+                break
+    if pit is not None and pit < 0.05 and "SHUNT_LOW_FLOW_PITRESSIN" not in existing_ids:
+        result.append(
+            {
+                "id": "SHUNT_LOW_FLOW_PITRESSIN",
+                "instruction": "ピトレシンが0.05未満です。0.05-0.1に増量してください。",
+            }
+        )
+        existing_ids.add("SHUNT_LOW_FLOW_PITRESSIN")
+
+    adr = _normalize_optional_float(vitals.get("adrenaline"))
+    if adr is None:
+        for key in ("Adrenaline", "ADR"):
+            adr = _normalize_optional_float(vitals.get(key))
+            if adr is not None:
+                break
+    if adr is not None and adr < 0.1 and "SHUNT_LOW_FLOW_ADRENALINE" not in existing_ids:
+        result.append(
+            {
+                "id": "SHUNT_LOW_FLOW_ADRENALINE",
+                "instruction": "アドレナリンが0.1未満です。増量を検討してください。",
+            }
+        )
+
+    return result
+
+
+def adjust_spo2_actions(
+    instructions, surgery_type: str, *, vitals=None, thresholds=None
+):
+    """Modify SpO2 related instructions based on selected surgery type."""
+
+    mapping = SPO2_ACTIONS.get(surgery_type)
+    if mapping:
+        adjusted = []
+        for inst in instructions:
+            _id = inst.get("id", "")
+            if _id.startswith("SPO2_UPPER") and "resolve" not in _id:
+                new_inst = dict(inst)
+                new_inst["instruction"] = mapping["upper"]
+                adjusted.append(new_inst)
+            elif _id.startswith("SPO2_LOWER") and "resolve" not in _id:
+                new_inst = dict(inst)
+                new_inst["instruction"] = mapping["lower"]
+                adjusted.append(new_inst)
+            else:
+                adjusted.append(inst)
+    else:
+        adjusted = list(instructions)
+
+    return _maybe_add_shunt_low_flow(adjusted, surgery_type, vitals, thresholds)
 
 # ---------------- 共通評価 ----------------
 
@@ -335,9 +400,15 @@ def compute_cvp_follow_instructions(
         bpup_tree_df=bpup_tree_df,
         previous_vitals=previous_vitals,
     )
+    adjusted = adjust_spo2_actions(
+        dedup_by_id(follow_raw),
+        surgery_type,
+        vitals=vitals,
+        thresholds=thresholds,
+    )
     return [
         r
-        for r in adjust_spo2_actions(dedup_by_id(follow_raw), surgery_type)
+        for r in adjusted
         if r["id"] not in ("CVP_UPPER_CHECK", "CVP_UPPER_CHECK_Y", "CVP_UPPER_CHECK_N")
     ]
 
@@ -851,7 +922,12 @@ def main_loop(
                 bpup_tree_df=bpup_tree_df,
                 previous_vitals=previous_drug_values,
             )
-            a_results = adjust_spo2_actions(dedup_by_id(a_results_raw), surgery_type)
+            a_results = adjust_spo2_actions(
+                dedup_by_id(a_results_raw),
+                surgery_type,
+                vitals=vitals,
+                thresholds=thresholds,
+            )
 
             ids = {r['id'] for r in a_results}
             if 'CVP_UPPER_CHECK' in ids:
@@ -1003,7 +1079,13 @@ def main_loop(
                     vitals['SPO2_CHECK_DONE'] = 'Y'
                     follow_raw = evaluate_all(vitals, tree_df, thresholds, phase='a', bpup_tree_df=bpup_tree_df)
                     follow = [
-                        r for r in adjust_spo2_actions(dedup_by_id(follow_raw), surgery_type)
+                        r
+                        for r in adjust_spo2_actions(
+                            dedup_by_id(follow_raw),
+                            surgery_type,
+                            vitals=vitals,
+                            thresholds=thresholds,
+                        )
                         if r['id'] != 'SPO2_CHECK'
                     ]
                     if not follow:
@@ -1073,6 +1155,8 @@ def main_loop(
                     )
                 ),
                 surgery_type,
+                vitals=vitals,
+                thresholds=thresholds,
             )
             for inst in r_results:
                 _id = inst['id']
