@@ -4,6 +4,7 @@ except Exception:  # pragma: no cover - pandas が無い環境でも動作させ
     pd = None  # type: ignore
 import time
 import math
+import threading
 from datetime import datetime
 import tkinter as tk
 from tkinter import simpledialog, messagebox, ttk
@@ -410,13 +411,43 @@ def prompt_thresholds():
 
 
 def yn_dialog(title, prompt):
-    root = tk.Tk(); root.withdraw()
+    """Return ``"Y"`` or ``"N"`` from a confirmation dialog.
+
+    When ``tkinter`` dialogs cannot be displayed (e.g. running from a worker
+    thread started by the GUI tabs or in headless environments) we gracefully
+    fall back to a console prompt so that the automation loop does not appear
+    to freeze while waiting for user input.
+    """
+
+    def console_prompt() -> str:
+        while True:
+            try:
+                ans = input(f"[{title}] {prompt} (Y/N): ").strip().upper()
+            except (EOFError, KeyboardInterrupt):
+                return "N"
+            if ans in ("Y", "N"):
+                return ans
+            print("Y か N を入力してください。")
+
+    if threading.current_thread() is not threading.main_thread():
+        return console_prompt()
+
+    parent = tk._default_root  # type: ignore[attr-defined]
+    created_root = False
+    if parent is None:
+        try:
+            parent = tk.Tk()
+            parent.withdraw()
+            created_root = True
+        except Exception:
+            return console_prompt()
+
     try:
         result = None
         while result not in ("Y", "N"):
-            dialog = tk.Toplevel(root)
+            dialog = tk.Toplevel(parent)
             dialog.title(title)
-            dialog.transient(root)
+            dialog.transient(parent)
             dialog.grab_set()
             dialog.resizable(False, False)
 
@@ -430,7 +461,7 @@ def yn_dialog(title, prompt):
                 selection["value"] = value
                 dialog.destroy()
 
-            def on_key(event):
+            def on_key(event):  # pragma: no cover - UI callback
                 key = event.keysym.lower()
                 if key == "y":
                     choose("Y")
@@ -448,13 +479,16 @@ def yn_dialog(title, prompt):
             dialog.columnconfigure(1, weight=1)
             yes_btn.focus_set()
 
-            root.wait_window(dialog)
+            parent.wait_window(dialog)
             result = selection["value"]
             if result not in ("Y", "N"):
-                messagebox.showerror("入力エラー", "YかNを入力してください", parent=root)
+                messagebox.showerror("入力エラー", "YかNを入力してください", parent=parent)
         return result
+    except Exception:
+        return console_prompt()
     finally:
-        root.destroy()
+        if created_root and parent is not None:
+            parent.destroy()
 
 
 def _coerce_to_datetime(value):
