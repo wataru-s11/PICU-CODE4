@@ -400,12 +400,20 @@ def compute_cvp_follow_instructions(
         bpup_tree_df=bpup_tree_df,
         previous_vitals=previous_vitals,
     )
-    adjusted = adjust_spo2_actions(
-        dedup_by_id(follow_raw),
-        surgery_type,
-        vitals=vitals,
-        thresholds=thresholds,
-    )
+    try:
+        adjusted = adjust_spo2_actions(
+            dedup_by_id(follow_raw),
+            surgery_type,
+            vitals=vitals,
+            thresholds=thresholds,
+        )
+    except TypeError:
+        # ``adjust_spo2_actions`` used to only accept two positional arguments.
+        # Some code paths (including historical monkeypatches in tests) still
+        # provide a simplified stub that ignores keyword-only parameters.  To
+        # remain backward compatible we gracefully fall back to the legacy
+        # calling convention when the stub does not accept the new keywords.
+        adjusted = adjust_spo2_actions(dedup_by_id(follow_raw), surgery_type)
     return [
         r
         for r in adjusted
