@@ -573,12 +573,34 @@ def handle_cvp_check_n(vitals_memory, vitals):
     vitals["CVP_NEXT_R_TS"] = None
 
 
-def handle_cvp_observation_comment(vitals_memory):
-    """Increment counter and return comment after three consecutive observations."""
-    vitals_memory["CVP_OBS_COUNT"] = vitals_memory.get("CVP_OBS_COUNT", 0) + 1
+def handle_cvp_observation_comment(vitals_memory, vitals=None, thresholds=None):
+    """Increment counter when CVP is high with SBP in range and emit guidance."""
+
+    cvp = _normalize_optional_float(vitals.get("CVP")) if vitals else None
+    sbp = _normalize_optional_float(vitals.get("SBP")) if vitals else None
+
+    cvp_u = thresholds.get("CVP_u") if thresholds else None
+    sbp_l = thresholds.get("SBP_l") if thresholds else None
+    sbp_u = thresholds.get("SBP_u") if thresholds else None
+
+    condition_met = (
+        cvp is not None
+        and cvp_u is not None
+        and cvp > cvp_u
+        and sbp is not None
+        and sbp_l is not None
+        and sbp_u is not None
+        and sbp_l < sbp < sbp_u
+    )
+
+    if condition_met:
+        vitals_memory["CVP_OBS_COUNT"] = vitals_memory.get("CVP_OBS_COUNT", 0) + 1
+    else:
+        vitals_memory["CVP_OBS_COUNT"] = 0
+
     if vitals_memory["CVP_OBS_COUNT"] >= 3:
         vitals_memory["CVP_OBS_COUNT"] = 0
-        return "僧帽弁逆流・三尖弁逆流と両心室の動きをみてCVPの基準値を変えてください"
+        return "CVP_u基準値を変更してください"
     return ""
 
 
@@ -875,7 +897,9 @@ def main_loop(
                             previous_vitals=previous_drug_values,
                         )
                         if not follow:
-                            comment = handle_cvp_observation_comment(vitals_memory)
+                            comment = handle_cvp_observation_comment(
+                                vitals_memory, vitals, thresholds
+                            )
                             follow = [{
                                 'id': 'OBSERVATION',
                                 'instruction': '経過観察',
