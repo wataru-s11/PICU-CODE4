@@ -517,7 +517,18 @@ def yn_dialog(title, prompt):
         try:
             parent = tk.Tk()
             parent.withdraw()
+            parent.update_idletasks()
             created_root = True
+        except Exception:
+            return console_prompt()
+    else:
+        try:
+            # ``winfo_exists`` will raise if the widget is invalid, which can
+            # happen when ``tkinter`` failed to bind to a display.  Falling back
+            # to the console prompt prevents the automation loop from appearing
+            # to freeze when a dialog window cannot be rendered.
+            parent.winfo_exists()
+            parent.update_idletasks()
         except Exception:
             return console_prompt()
 
